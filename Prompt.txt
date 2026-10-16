@@ -1,0 +1,864 @@
+Build Prompt: Hybrid SSM–Attention–MoE Language Model with CLM Memory
+Target agent: OpenCode (or any capable coding agent)
+Deliverable: A working, trainable, 100M–500M parameter language model built from scratch in PyTorch
+Scope: Architecture, training pipeline, memory system, evaluation harness, documentation
+Constraint: Must run on a single consumer GPU (8–24 GB VRAM) for small-scale validation; must scale gracefully to multi-GPU for larger runs
+
+0. How to Read This Prompt
+This is a specification, not a script. It tells you what to build, why each piece exists, and what to avoid. It deliberately leaves implementation details open so you can choose the best tools, patterns, and simplifications for the target scale.
+
+Read the entire document before writing code. Then propose a plan, a repo structure, and a milestone breakdown. Wait for approval before implementing. Build in small, testable increments. Do not attempt to implement everything in one pass.
+
+When you encounter ambiguity, prefer simplicity over cleverness, working code over optimal code, and clear structure over dense abstractions. When in doubt, ask.
+
+1. Mission
+Build a from-scratch language model that combines four architectural ideas that are individually proven but rarely co-trained:
+
+State Space Model (SSM) backbone for linear-time, constant-memory sequence processing
+
+Hybrid attention islands (sparse + compressed + local) for precise recall
+
+Mixture-of-Experts (MoE) feed-forward layers for knowledge capacity without proportional compute
+
+CLM-style editable context memory that lives in RAM and is managed by the model itself
+
+The goal is not to beat frontier models. The goal is to build a small, clean, well-documented implementation that demonstrates the architecture works at 100M–500M scale on a single GPU, and that can be scaled up later without rewriting the core.
+
+This is a research and engineering project. Correctness, clarity, and reproducibility matter more than raw benchmark numbers.
+
+2. Non-Negotiable Constraints
+These are hard requirements. Do not violate them without explicit approval.
+
+Framework: PyTorch. Nothing else. Not TensorFlow, not JAX, not Rust, not BunJS. The ecosystem for SSMs, MoE, and sparse attention is PyTorch-native.
+
+Scale: The default configuration must train a ~100M–500M parameter model on a single consumer GPU. Provide configs for 100M, 250M, and 500M.
+
+Memory system: The CLM memory lives in RAM. It is not a disk-backed store. It is not a vector database. It is not RAG. It is an editable context buffer.
+
+No external retrieval: No FAISS, no Chroma, no Pinecone, no LanceDB, no external index. The memory is the context.
+
+Reproducibility: Every training run must be seedable and reproducible. Log configs, seeds, and environment.
+
+No magic: No hidden dependencies on pretrained checkpoints unless explicitly configured. The model must be trainable from random initialization.
+
+3. Architectural Overview
+The model is a stack of repeating blocks. Each block is either a Mamba block or an Attention block, interleaved at a configurable ratio. Every block is followed by a feed-forward network, which may be dense or MoE.
+
+The default interleaving pattern is 1 Attention : 3 Mamba (Jamba-style). This means for every 4 layers, 1 is attention and 3 are Mamba.
+
+The default feed-forward configuration is:
+
+Mamba blocks use dense FFN
+
+Attention blocks use MoE FFN
+
+This is a deliberate choice: attention layers are where precise recall happens, and MoE is where knowledge capacity is added. Mamba layers stay lean and fast.
+
+3.1 High-Level Data Flow
+text
+Input Tokens
+    ↓
+Token Embedding + Positional Encoding
+    ↓
+[Live Context Buffer] ← CLM edits happen here
+    ↓
+┌─────────────────────────────────────┐
+│  Hybrid Backbone (N layers)         │
+│  ┌───────┐ ┌───────┐ ┌───────┐     │
+│  │Mamba  │ │Mamba  │ │Mamba  │ ... │
+│  │+Dense │ │+Dense │ │+Dense │     │
+│  └───────┘ └───────┘ └───────┘     │
+│  ┌───────────────────────────┐      │
+│  │  Hybrid Attention Block   │      │
+│  │  + MoE FFN                │      │
+│  └───────────────────────────┘      │
+└─────────────────────────────────────┘
+    ↓
+RMSNorm
+    ↓
+LM Head
+    ↓
+Next Token
+    ↓
+[Optional: CLM edit command]
+    ↓
+[Context buffer updated in RAM]
+3.2 Parameter Budget (Default 250M Config)
+Component	Approx. Params	Notes
+Embedding	~30M	Vocab 32K, dim 768
+Mamba blocks (×18)	~120M	Includes dense FFN
+Attention blocks (×6)	~60M	Includes MoE FFN
+MoE experts	~40M	32 routed + 2 shared
+LM Head	~25M	Tied to embedding
+Total	~275M	Adjust per config
+These are guidance numbers, not exact targets. Tune as needed.
+
+4. Component Specifications
+4.1 Input Stage
+Token Embedding
+
+Standard learned embedding table.
+
+Vocabulary size: 32K default, configurable.
+
+Embedding dim: 768 default for 250M config.
+
+Weight tying between embedding and LM head is enabled by default. This saves parameters and is standard practice.
+
+Positional Encoding
+
+Do not use learned absolute positional embeddings. Mamba handles position implicitly, and attention islands need position information.
+
+Use Rotary Position Embeddings (RoPE) applied only to the attention blocks. Mamba blocks do not need RoPE.
+
+RoPE base frequency: 10,000 default. Expose as config.
+
+Why this matters: Mamba's recurrence already encodes order. Adding absolute positional embeddings would be redundant and could hurt long-context generalization. RoPE on attention layers gives them the position awareness they need without interfering with the SSM's dynamics.
+
+4.2 Mamba Block (SSM Core)
+This is the workhorse of the model. It handles the bulk of sequence mixing.
+
+Requirements:
+
+Use a selective SSM (Mamba-2 style preferred, Mamba-1 acceptable).
+
+Support both training (parallel scan) and inference (recurrent) modes.
+
+Support variable sequence lengths without padding.
+
+Expose d_state, d_conv, expand as config parameters.
+
+Implementation guidance:
+
+You may use the official mamba-ssm package if it installs cleanly and supports your CUDA version.
+
+If mamba-ssm is not viable, implement a minimal Mamba block yourself using PyTorch. Correctness matters more than speed for the first version.
+
+A pure-PyTorch reference implementation is acceptable as a fallback. It will be slower but easier to debug.
+
+Dense FFN after Mamba:
+
+Standard 2-layer MLP: Linear(dim, 4*dim) → GELU/SiLU → Linear(4*dim, dim)
+
+Use SwiGLU if you want a modern activation, but plain GELU is fine.
+
+Include dropout (default 0.0 for pretraining, configurable).
+
+Do not:
+
+Do not add MoE to Mamba blocks in the default config. Naive MoE on Mamba projections is known to fail. Keep Mamba dense.
+
+Do not add attention to Mamba blocks. They are separate block types.
+
+4.3 Hybrid Attention Block
+This is the precision instrument. It handles exact recall and long-range dependency resolution.
+
+The attention block has three parallel branches combined by a learned gate, plus a GQA projection for the KV cache.
+
+Branch 1: Sliding Window (Local)
+
+Each token attends to the previous W tokens (default W = 512).
+
+Cheap, captures local structure.
+
+Use a standard sliding-window attention kernel. If none is available, mask a full attention computation. For long sequences, prefer an efficient kernel.
+
+Branch 2: Compressed Global (Summary)
+
+Maintain a set of G learnable "global summary" tokens (default G = 64).
+
+These tokens are updated via cross-attention with the sequence, and in turn provide global context to every token.
+
+This is inspired by SCOUT-style compressed segment representations and set-based global attention.
+
+Implementation: a small set of learnable embeddings that attend to the sequence, and the sequence attends back to them.
+
+Branch 3: Selective Fine-Grained (Indexer)
+
+A learned indexer scores token importance and selects the top K tokens per query (default K = 256).
+
+Only those K tokens are attended to.
+
+This recovers precise recall of important tokens without full quadratic attention.
+
+This is inspired by NSA-style selective attention.
+
+Combination:
+
+Each branch produces an attention output.
+
+A learned gate (small MLP or softmax over branch weights) combines them.
+
+The gate should be conditioned on the query and the current context.
+
+GQA Projection:
+
+Apply Grouped Query Attention to the combined output for KV cache efficiency.
+
+Default: 8 query heads, 2 KV heads. Configurable.
+
+Do not use MLA (Multi-head Latent Attention). It is known to underperform at small scale.
+
+RoPE:
+
+Apply RoPE to queries and keys in all branches.
+
+Share RoPE across branches for simplicity.
+
+Do not:
+
+Do not use full dense attention as the default. It defeats the purpose.
+
+Do not use MLA. It's the wrong tool for this scale.
+
+Do not make the three branches optional at first. Build them all, then ablate.
+
+4.4 MoE Feed-Forward
+This is where knowledge capacity lives.
+
+Configuration (default):
+
+32 routed experts
+
+2 shared experts
+
+Top-2 routing
+
+Expert hidden dim: same as dense FFN (4 * dim for SwiGLU, or 8/3 * dim for modern variants)
+
+Shared experts always active, routed experts gated
+
+Routing:
+
+Use a learned router: Linear(dim, num_experts) followed by softmax or sigmoid.
+
+Top-k selection (default k = 2).
+
+Apply load-balancing loss (auxiliary loss) to prevent expert collapse.
+
+Consider an auxiliary-loss-free balancing strategy if you can implement it cleanly (DeepSeek-V3 style). Otherwise, standard auxiliary loss is fine.
+
+Expert implementation:
+
+Each expert is a 2-layer MLP.
+
+Use torch.bmm or grouped GEMM for efficiency if possible.
+
+For the first version, a simple loop over experts is acceptable. Optimize later.
+
+Dropout / capacity:
+
+Optional expert capacity factor. Default: no capacity limit (let all tokens route freely).
+
+If training is unstable, introduce capacity limits and token dropping.
+
+Do not:
+
+Do not put MoE on Mamba blocks in the default config.
+
+Do not use more than 64 routed experts at this scale. It's overkill and harder to train.
+
+Do not skip the load-balancing loss. Expert collapse is the #1 failure mode.
+
+4.5 Output Head
+RMSNorm before the LM head.
+
+Linear projection to vocabulary size.
+
+Weight-tied to the input embedding by default.
+
+No bias terms.
+
+Optional: Diffusion Decoder Head
+
+This is a stretch goal, not part of the core deliverable.
+
+If implemented, it should be a separate head that can be enabled via config.
+
+It should be trained with a denoising objective and used for parallel generation.
+
+Do not let this block the core model from working.
+
+4.6 CLM Memory Layer
+This is the feature that makes the model "know about you" without retraining weights.
+
+Core principle: The live context buffer is the memory. It lives in RAM. The model can edit it in place.
+
+Interface:
+
+Expose the context buffer as an editable object.
+
+The model can emit edit commands as special tokens or structured output.
+
+Supported operations (at minimum):
+
+READ — retrieve a slice of context
+
+WRITE — append or insert content
+
+REPLACE — replace a span
+
+DELETE — remove a span
+
+SUMMARIZE — compress a span into a shorter form
+
+Commands should be textual and human-readable. Example:
+
+text
+<|edit|>REPLACE line 42 with "User prefers Python over JavaScript"<|/edit|>
+Execution:
+
+After each generation step, check for edit commands.
+
+Apply them to the context buffer in RAM.
+
+Re-tokenize the affected region if necessary.
+
+Continue generation with the updated buffer.
+
+KV cache handling:
+
+Editing the middle of the context invalidates the KV cache from the edit point onward.
+
+Recompute the KV cache for the affected suffix.
+
+For the first version, a full recompute after each edit is acceptable. Optimize later.
+
+Training:
+
+Zero-shot: the model can use CLM with no training, just prompting. This is the default.
+
+Optional RL: provide a training script for RL-based memory policy learning. This is a stretch goal.
+
+Do not make RL training mandatory. The zero-shot path must work.
+
+Do not:
+
+Do not use disk. The buffer is RAM-only.
+
+Do not use a vector database.
+
+Do not use external retrieval.
+
+Do not make the memory system a separate service. It is part of the model's runtime.
+
+5. Training Pipeline
+5.1 Data
+Default dataset mix:
+
+99% FineWeb-Edu (or a comparable high-quality web text dataset)
+
+1% Cosmopedia-v2 (or a comparable synthetic textbook dataset)
+
+This mix is proven at small scale (Supra2-Nano).
+
+Tokenization:
+
+Train a BPE tokenizer on a sample of the data.
+
+Vocabulary size: 32K default.
+
+Use a well-tested tokenizer library (HuggingFace tokenizers is fine).
+
+Save the tokenizer with the model checkpoint.
+
+Data loading:
+
+Stream data from disk, tokenize on the fly or pre-tokenize into shards.
+
+Pack sequences to maximize GPU utilization. No padding.
+
+Support variable sequence lengths.
+
+Shuffle at the shard level, not the sample level.
+
+Sequence length:
+
+Default: 2048 tokens for training.
+
+Support up to 8192 for long-context fine-tuning.
+
+RoPE and Mamba both handle variable lengths. Exploit this.
+
+5.2 Optimizer
+AdamW with decoupled weight decay.
+
+Learning rate: 3e-4 default for 250M config. Scale down for larger models.
+
+Weight decay: 0.1 for most parameters, 0.0 for norms and biases.
+
+Betas: (0.9, 0.95).
+
+Gradient clipping: 1.0.
+
+Split learning rate (critical):
+
+The "trunk" of the model (embeddings, Mamba blocks, attention projections, routers, norms) should be trained at 0.1× the learning rate of the experts and other fast-learning components.
+
+This is the Mini-AGI trick for reducing catastrophic forgetting and stabilizing training.
+
+Implement this as a parameter group mechanism.
+
+5.3 Schedule
+Warmup: 2000 steps, linear from 0 to max LR.
+
+Decay: cosine decay to 10% of max LR.
+
+Total steps: configurable. Default: 100K steps for 250M config on ~10B tokens.
+
+Gradient accumulation: configurable. Default: 4.
+
+5.4 Mixed Precision
+Use torch.amp with bfloat16 if supported, otherwise float16 with loss scaling.
+
+Keep the optimizer state in float32.
+
+Keep the Mamba SSM state in float32 to avoid numerical instability.
+
+5.5 Checkpointing
+Save checkpoints every N steps (default: 5000).
+
+Save optimizer state, scheduler state, RNG state, and config.
+
+Support resuming from checkpoint.
+
+Keep the last 3 checkpoints by default. Configurable.
+
+5.6 Logging
+Log loss, learning rate, gradient norm, throughput (tokens/sec), and memory usage.
+
+Log MoE routing statistics: expert load, routing entropy, number of active experts.
+
+Log attention branch gate values (which branch is being used).
+
+Use TensorBoard or Weights & Biases. Configurable.
+
+5.7 Stability Monitoring
+Watch for these failure modes and log early warning signals:
+
+Expert collapse: If one expert receives >50% of tokens, routing is collapsing. Increase load-balancing loss weight.
+
+SSM divergence: If SSM state norms grow unbounded, reduce learning rate or add gradient clipping to SSM parameters.
+
+Attention gate collapse: If the gate assigns near-zero weight to one branch, the model is ignoring that branch. Log gate values and check initialization.
+
+Loss spikes: If loss spikes, check for bad data batches. Consider gradient clipping or LR warmup extension.
+
+6. What We Want
+6.1 Code Quality
+Clean, modular, readable code. Someone should be able to read the repo and understand the architecture in an hour.
+
+Type hints on all public functions and classes.
+
+Docstrings on all modules, classes, and public methods.
+
+Config-driven. Everything should be configurable via a YAML or dataclass config. No hardcoded hyperparameters.
+
+Tested. Unit tests for each component. Integration test for a full forward pass. Smoke test for a training step.
+
+Reproducible. Seeds set. Environment logged. Configs saved with checkpoints.
+
+6.2 Documentation
+README.md with:
+
+What the model is
+
+Why each component exists
+
+How to install
+
+How to train a small model
+
+How to run inference
+
+How to use the CLM memory
+
+ARCHITECTURE.md with:
+
+Detailed component descriptions
+
+Diagrams (ASCII or Mermaid)
+
+Design rationale
+
+Known limitations
+
+TRAINING.md with:
+
+Data preparation
+
+Training commands
+
+Hyperparameter guidance
+
+Troubleshooting
+
+CLM.md with:
+
+How the memory system works
+
+How to use it
+
+How to extend it
+
+Limitations
+
+6.3 Milestones
+Build in this order. Do not skip ahead.
+
+Repo scaffold + config system + logging. No model code yet.
+
+Tokenizer training + data pipeline. Verify data loads correctly.
+
+Mamba block (pure PyTorch reference). Test forward and backward.
+
+Dense FFN. Test forward and backward.
+
+Basic Mamba-only model. Train on tiny data. Verify loss decreases.
+
+Hybrid attention block (all three branches). Test each branch in isolation.
+
+Attention-only model. Train on tiny data. Verify loss decreases.
+
+Hybrid model (Mamba + attention interleaved). Train on tiny data.
+
+MoE FFN. Test routing, load balancing, expert utilization.
+
+Full hybrid model with MoE. Train on tiny data.
+
+CLM memory layer. Test read/write/edit operations.
+
+Full system integration. Train on real data.
+
+Evaluation harness. Run standard benchmarks.
+
+Documentation pass. Fill in all docs.
+
+Optimization pass. Profile, optimize, clean up.
+
+At each milestone, stop and report. Do not proceed without confirmation.
+
+6.4 Performance Targets
+These are soft targets, not hard requirements.
+
+Training throughput: >10K tokens/sec on a single RTX 3090 for the 250M config.
+
+Inference latency: <50ms per token for the 250M config on the same GPU.
+
+Memory usage: <16GB VRAM for training the 250M config with batch size 8 and sequence length 2048.
+
+CLM edit latency: <100ms per edit operation.
+
+If you cannot hit these, report the actual numbers and explain why.
+
+7. What We Do NOT Want
+7.1 Architectural Anti-Patterns
+Do not use full dense attention as the default. It defeats the purpose of the SSM backbone.
+
+Do not put MoE on Mamba blocks in the default config. Naive MoE on Mamba projections fails.
+
+Do not use MLA (Multi-head Latent Attention). It underperforms at small scale. Use GQA.
+
+Do not use learned absolute positional embeddings. Use RoPE on attention layers only.
+
+Do not use a disk-backed memory system. The CLM memory is RAM-only.
+
+Do not use external retrieval (RAG, vector DB). The memory is the context.
+
+Do not use a separate memory service. The memory is part of the model runtime.
+
+Do not use more than 64 routed experts at this scale. It's overkill.
+
+Do not skip load-balancing loss. Expert collapse is the #1 failure mode.
+
+7.2 Engineering Anti-Patterns
+Do not write monolithic code. Break everything into small, testable modules.
+
+Do not hardcode hyperparameters. Use configs.
+
+Do not skip tests. Every component needs a unit test.
+
+Do not skip logging. You need to see what's happening during training.
+
+Do not use obscure dependencies. Stick to well-maintained, widely-used libraries.
+
+Do not over-abstract. A small amount of duplication is better than a premature abstraction.
+
+Do not optimize prematurely. Get it working first, then profile and optimize.
+
+Do not skip documentation. If it's not documented, it doesn't exist.
+
+7.3 Process Anti-Patterns
+Do not implement everything at once. Build incrementally, test at each step.
+
+Do not skip milestones. Each milestone validates a piece of the architecture.
+
+Do not ignore failures. If something doesn't work, debug it before moving on.
+
+Do not assume. If a design decision is unclear, ask.
+
+Do not over-engineer. Simplicity is a feature.
+
+7.4 Scope Creep
+Do not implement the diffusion decoder in the first version. It's a stretch goal.
+
+Do not implement RL training for CLM in the first version. Zero-shot CLM is enough.
+
+Do not implement multi-GPU training in the first version. Single-GPU is enough.
+
+Do not implement distributed inference in the first version. Single-process is enough.
+
+Do not implement a web UI or API in the first version. CLI is enough.
+
+Do not implement multimodal input in the first version. Text only.
+
+These can all be added later. They should not block the core deliverable.
+
+8. Repository Structure
+Propose your own structure, but it should roughly look like this:
+
+text
+hybrid-lm/
+├── README.md
+├── ARCHITECTURE.md
+├── TRAINING.md
+├── CLM.md
+├── pyproject.toml
+├── configs/
+│   ├── 100m.yaml
+│   ├── 250m.yaml
+│   └── 500m.yaml
+├── src/
+│   └── hybrid_lm/
+│       ├── __init__.py
+│       ├── config.py
+│       ├── model/
+│       │   ├── __init__.py
+│       │   ├── backbone.py
+│       │   ├── mamba_block.py
+│       │   ├── attention_block.py
+│       │   ├── hybrid_attention.py
+│       │   ├── moe.py
+│       │   ├── dense_ffn.py
+│       │   └── lm_head.py
+│       ├── memory/
+│       │   ├── __init__.py
+│       │   ├── context_buffer.py
+│       │   ├── edit_engine.py
+│       │   └── clm.py
+│       ├── data/
+│       │   ├── __init__.py
+│       │   ├── tokenizer.py
+│       │   ├── dataset.py
+│       │   └── dataloader.py
+│       ├── training/
+│       │   ├── __init__.py
+│       │   ├── trainer.py
+│       │   ├── optimizer.py
+│       │   ├── scheduler.py
+│       │   └── checkpoint.py
+│       ├── inference/
+│       │   ├── __init__.py
+│       │   ├── generator.py
+│       │   └── kv_cache.py
+│       └── utils/
+│           ├── __init__.py
+│           ├── logging.py
+│           ├── seed.py
+│           └── profiling.py
+├── scripts/
+│   ├── train.py
+│   ├── evaluate.py
+│   ├── generate.py
+│   └── prepare_data.py
+└── tests/
+    ├── test_mamba_block.py
+    ├── test_attention_block.py
+    ├── test_moe.py
+    ├── test_clm.py
+    └── test_integration.py
+This is a suggestion. Adapt as needed. But keep the separation of concerns: model, memory, data, training, inference, utils.
+
+9. Testing Strategy
+9.1 Unit Tests
+Every component needs a unit test that verifies:
+
+Forward pass produces correct output shape
+
+Backward pass produces gradients
+
+Output is finite (no NaNs, no Infs)
+
+Component handles variable sequence lengths
+
+Component handles batch sizes > 1
+
+9.2 Integration Tests
+Full forward pass through the hybrid model
+
+Full backward pass through the hybrid model
+
+One training step on synthetic data
+
+One generation step with KV cache
+
+One CLM edit operation
+
+9.3 Smoke Tests
+Train a tiny model (1M params) for 100 steps on synthetic data
+
+Verify loss decreases
+
+Verify checkpoint save/load
+
+Verify resume from checkpoint
+
+9.4 Numerical Stability Tests
+Run forward pass with extreme inputs (very long sequences, very large values)
+
+Verify no NaNs or Infs
+
+Verify SSM state norms stay bounded
+
+Verify attention gate values stay in [0, 1]
+
+9.5 Evaluation
+Provide a script to evaluate on standard benchmarks (e.g., a subset of lm-eval-harness)
+
+Report perplexity on a held-out set
+
+Report MoE routing statistics
+
+Report attention gate statistics
+
+Report CLM memory usage and edit frequency
+
+10. Areas of Freedom
+You are explicitly allowed to make decisions in these areas without asking:
+
+Specific library choices for tokenization, data loading, logging
+
+Specific kernel implementations for attention, MoE, SSM (as long as they're correct)
+
+Specific config defaults (learning rate, batch size, etc.) within reasonable ranges
+
+Specific file organization within the proposed structure
+
+Specific test frameworks (pytest, unittest, etc.)
+
+Specific logging backends (TensorBoard, W&B, etc.)
+
+Specific optimization strategies (after the first working version)
+
+Specific naming conventions for internal variables
+
+Specific error handling patterns
+
+Specific documentation formats (as long as the required content is covered)
+
+Use your judgment. If you're unsure, ask. If you're confident, proceed and document your choice.
+
+11. Areas Requiring Approval
+Ask before making decisions in these areas:
+
+Changing the architecture (e.g., removing a branch, changing the interleaving ratio)
+
+Adding new dependencies that aren't standard in the PyTorch ecosystem
+
+Changing the CLM memory semantics (e.g., making it disk-backed)
+
+Adding scope beyond the defined milestones
+
+Skipping a milestone or changing the order
+
+Making the model larger than 500M params in the default config
+
+Adding multi-GPU support before the single-GPU version works
+
+Adding a web UI or API before the CLI works
+
+These are not forbidden. They just require a conversation first.
+
+12. Success Criteria
+The project is successful when:
+
+A 250M parameter hybrid model can be trained from scratch on a single consumer GPU.
+
+Training loss decreases smoothly and reaches a reasonable perplexity on a held-out set.
+
+The model can generate coherent text.
+
+The CLM memory system works: the model can read, write, and edit its context buffer.
+
+The model can use the CLM memory zero-shot (no RL training required).
+
+All components have unit tests and pass them.
+
+The documentation is complete and accurate.
+
+The code is clean, readable, and maintainable.
+
+A new contributor can clone the repo, install dependencies, and train a model in under an hour.
+
+The architecture is extensible: adding a new component (e.g., diffusion head) does not require rewriting the core.
+
+13. References
+These are the papers and projects that inform the architecture. Read them if you need context.
+
+Mamba / Mamba-2: Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
+
+Jamba: AI21 Labs, "Jamba: A Hybrid Transformer-Mamba Language Model"
+
+Nemotron 3 Super: NVIDIA, hybrid Mamba-Transformer MoE
+
+HybridMoE Titan: 450M hybrid model trained on a single GPU
+
+Mini-AGI: Continual learning on an 8GB laptop with split learning rates
+
+Supra2-Nano: Small-scale training recipe with FineWeb-Edu + Cosmopedia-v2
+
+CLM: Meta, "Context Language Models" (context as editable file, in RAM)
+
+NSA: Native Sparse Attention with three branches (compressed, selected, sliding)
+
+SCOUT: Segment compression for long-context attention
+
+MoRAM: Mixture of Rank-1 Associative Memory (router-free memory)
+
+DeepSeek-V3: MoE with auxiliary-loss-free load balancing
+
+Hydra: 1.6B hybrid blueprint with SSM + sparse attention + MoE + memory
+
+You do not need to read all of these. Read the ones most relevant to the component you're working on.
+
+14. First Actions
+Before writing any code, do the following:
+
+Read this entire prompt.
+
+Propose a repo structure based on Section 8.
+
+Propose a milestone breakdown based on Section 6.3.
+
+Propose a config schema based on Section 4.
+
+Identify any ambiguities or concerns.
+
+Wait for approval.
+
+Do not start coding until you have approval on the plan. This is a large project. A good plan saves days of rework.
+
+Once approved, start with Milestone 1 (repo scaffold). Build incrementally. Test at each step. Report at each milestone.
+
+15. Final Notes
+This is a research project. It is expected that some things will not work on the first try. That is fine. What matters is that you build systematically, test thoroughly, and document clearly.
+
+When something fails, do not hide it. Report it. Explain what you tried, what you observed, and what you think the cause is. A well-documented failure is more valuable than a silently broken success.
+
+When something works, do not over-celebrate. Verify it. Test it. Make sure it works under different conditions. Then move on.
+
+The goal is not to build the world's best language model. The goal is to build a clean, working, well-documented implementation of a novel hybrid architecture that others can learn from, extend, and improve.
+
+Build it well.
+
+End of prompt.

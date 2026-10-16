@@ -1,0 +1,44 @@
+[project]
+name = "lyden"
+version = "0.1.0"
+description = "Hybrid SSM-Attention-MoE language model with editable CLM memory"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.7,<3",
+    "tokenizers>=0.21",
+    "datasets>=3.0",
+    "pyyaml>=6.0",
+    "numpy>=2.0",
+    "tensorboard>=2.19",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.9",
+    "mypy>=1.15",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lyden"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
