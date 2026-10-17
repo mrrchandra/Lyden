@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import dataclasses
 import typing
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
 
@@ -235,7 +236,8 @@ def _build(cls: type, payload: Mapping[str, Any]) -> Any:
         if key not in field_names:
             raise ValueError(f"Unknown config key '{key}' for {cls.__name__}")
         resolved = hints.get(key, Any)
-        if isinstance(value, Mapping) and dataclasses.is_dataclass(resolved):
+        is_cfg_cls = isinstance(resolved, type) and dataclasses.is_dataclass(resolved)
+        if isinstance(value, Mapping) and is_cfg_cls:
             value = _build(resolved, value)
         elif isinstance(value, list) and typing.get_origin(resolved) is tuple:
             value = tuple(value)

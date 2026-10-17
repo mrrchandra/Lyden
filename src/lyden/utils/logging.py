@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import platform
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from lyden.config import LydenConfig, save_config
 
