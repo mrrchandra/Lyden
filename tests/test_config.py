@@ -27,8 +27,8 @@ def test_defaults_construct() -> None:
 
 
 def test_layer_kinds_expansion() -> None:
-    cfg = ModelConfig(n_layers=8, layer_pattern="mma")
-    assert cfg.layer_kinds() == ["m", "m", "a"] * 2
+    cfg = ModelConfig(n_layers=9, layer_pattern="mma")
+    assert cfg.layer_kinds() == ["m", "m", "a"] * 3
 
 
 def test_unknown_key_rejected() -> None:

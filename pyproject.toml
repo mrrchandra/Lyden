@@ -5,7 +5,9 @@ description = "Hybrid SSM-Attention-MoE language model with editable CLM memory"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "torch>=2.7,<3",
+    "torch>=2.9,<2.10",
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
+    "mamba-ssm @ https://github.com/state-spaces/mamba/releases/download/v2.3.2.post1/mamba_ssm-2.3.2.post1+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
     "tokenizers>=0.21",
     "datasets>=3.0",
     "pyyaml>=6.0",
@@ -24,6 +26,9 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lyden"]
