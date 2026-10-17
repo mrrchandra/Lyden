@@ -1,10 +1,12 @@
-# Lyden nano config: ~5M params for CI / smoke tests on any machine.
+# Lyden nano config: ~12M params for CI / smoke tests on any machine.
+# dim 256 + d_state 64 keeps mamba d_in_proj 8-aligned for causal-conv1d's
+# recurrent path (see scripts/dinproj_align.sh).
 model:
   vocab_size: 8192
-  dim: 128
+  dim: 256
   n_layers: 8
   layer_pattern: "mmma"
-  mamba: {d_state: 32, d_conv: 4, expand: 2}
+  mamba: {d_state: 64, d_conv: 4, expand: 2}
   attention: {n_heads: 4, n_kv_heads: 2, window: 128, n_summary: 16, topk: 32, rope_base: 10000.0}
   dense_ffn: {hidden: 512, activation: "swiglu"}
   moe: {n_routed: 8, n_shared: 2, top_k: 2, expert_hidden: 256, balance: "loss_free", aux_loss_weight: 0.01}
