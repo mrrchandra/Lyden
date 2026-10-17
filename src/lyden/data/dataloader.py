@@ -12,6 +12,7 @@ Two backends:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -95,6 +96,22 @@ class PackedBatcher:
         self.shuffle = shuffle
         self._rng = np.random.default_rng(seed)
         self._sequential_offset = 0
+
+    def state_dict(self) -> dict[str, object]:
+        """Stream position + RNG state (checkpoint-resume support)."""
+        return {
+            "rng_state": self._rng.bit_generator.state["state"],
+            "rng_next_uint64": self._rng.bit_generator.state["next_uint64"],
+            "sequential_offset": self._sequential_offset,
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self._rng.bit_generator.state = {
+            "bit_generator": "PCG64",
+            "state": state["rng_state"],
+            "next_uint64": state.get("rng_next_uint64", 0),
+        }
+        self._sequential_offset = int(state["sequential_offset"])
 
     def next_batch(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return ``(input, target)`` int64 LongTensors of shape (B, L).

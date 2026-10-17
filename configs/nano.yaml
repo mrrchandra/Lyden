@@ -30,9 +30,9 @@ training:
   log_backend: "console"
   out_dir: "runs"
 data:
-  dataset: "synthetic"
-  data_dir: "~/lyden-data"
-  tokenizer_dir: "~/lyden-data/tokenizer-nano"
+  dataset: "tinystories"
+  data_dir: "~/lyden-data-nano"
+  tokenizer_dir: "~/lyden-data-nano/tokenizer"
   val_fraction: 0.01
 clm:
   buffer_max_chars: 4000

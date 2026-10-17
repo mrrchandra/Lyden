@@ -82,13 +82,18 @@ class LydenBlock(nn.Module):
         else:
             if mixer_cache is not None:
                 raise ValueError("attention blocks accept no mixer_cache yet")
-            mixed = self.mixer(normed)
+            if collect_moe_stats:
+                branches = self.mixer(normed, return_branches=True)
+                stats: dict[str, Any] = {"gate": branches["gate"]}
+                mixed = branches["out"]
+            else:
+                mixed = self.mixer(normed)
         out = x + mixed
         normed2 = self.norm2(out)
         if self.kind == "a" and collect_moe_stats:
-            ffn_out, stats = self.ffn(normed2, collect_stats=True)
-            out2 = out + ffn_out
-            return out2, stats
+            ffn_out, moe_stats = self.ffn(normed2, collect_stats=True)
+            stats.update(moe_stats)
+            return out + ffn_out, stats
         return out + self.ffn(normed2)
 
 
