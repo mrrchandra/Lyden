@@ -199,6 +199,24 @@ def test_keep_last_prunes(tmp_path: Path) -> None:
     assert int(files[-1].stem.split("_")[1]) == 4
 
 
+def test_packed_batcher_state_roundtrip() -> None:
+    from lyden.data.dataloader import PackedBatcher, SyntheticDataset
+
+    ds = SyntheticDataset(64, seed=3, tokens_total=100_000)
+    b1 = PackedBatcher(ds, seq_len=16, batch_size=4, seed=7, shuffle=True)
+    for _ in range(3):
+        b1.next_batch()
+    state = b1.state_dict()
+    expect = [b1.next_batch() for _ in range(2)]
+
+    b2 = PackedBatcher(ds, seq_len=16, batch_size=4, seed=7, shuffle=True)
+    b2.load_state_dict(state)
+    got = [b2.next_batch() for _ in range(2)]
+    for (xf, yf), (xr, yr) in zip(expect, got, strict=True):
+        assert torch.equal(xf, xr)
+        assert torch.equal(yf, yr)
+
+
 # ------------------------------------------------------------ monitors
 @requires_gpu
 def test_stability_monitors() -> None:
