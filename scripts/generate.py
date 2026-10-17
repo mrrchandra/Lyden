@@ -20,6 +20,7 @@ import torch  # noqa: E402
 
 from lyden.config import LydenConfig, load_config  # noqa: E402
 from lyden.data.tokenizer import LydenTokenizer  # noqa: E402
+from lyden.memory import generate_with_clm  # noqa: E402
 from lyden.model.model import LydenModel  # noqa: E402
 
 
@@ -70,6 +71,8 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--clm", action="store_true", help="enable CLM editable memory")
+    parser.add_argument("--max-edits", type=int, default=4)
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -83,6 +86,22 @@ def main() -> None:
     else:
         ids = [tok.bos_id]
     print(f"[prompt] {prompt!r}")
+    if args.clm:
+        text, buffer = generate_with_clm(
+            model,
+            tok,
+            prompt,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            max_edits=args.max_edits,
+        )
+        print("[clm buffer]")
+        print(text)
+        (Path(cfg.training.out_dir) / "clm_buffer.json").write_text(
+            str(buffer.state_dict()), encoding="utf-8"
+        )
+        return
     out_ids = generate(
         model,
         ids,
