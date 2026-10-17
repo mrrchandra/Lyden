@@ -159,13 +159,24 @@ class HybridAttention(nn.Module):
         return expand_and_layout(k), expand_and_layout(v)
 
     # ------------------------------------------------------------------ branches
-    def _sliding(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-        """Causal window attention: j allowed iff t - window <= j <= t."""
-        b, h, seq_len, dh = q.shape
+    def _sliding(self, q: Tensor, k: Tensor, v: Tensor, q_pos: Tensor | None = None) -> Tensor:
+        """Causal window attention: j allowed iff t - window < j <= t.
+
+        ``q_pos`` overrides query positions (absolute); keys always use
+        0..Lk-1 (cached buffers are contiguous fresh re-encodings). Default
+        None = 0..Lq-1, matching the training path exactly.
+        """
+        dh = self.head_dim
+        lk = k.shape[2]
         scores = q @ k.transpose(-1, -2) / math.sqrt(dh)
-        pos = torch.arange(seq_len, device=q.device)
-        causal = pos[None, :] <= pos[:, None]
-        in_win = pos[:, None] - pos[None, :] < self.window  # t - j < window: last W tokens
+        if q_pos is None:
+            pos = torch.arange(lk, device=q.device)
+            causal = pos[None, :] <= pos[:, None]
+            in_win = pos[:, None] - pos[None, :] < self.window  # t - j < window
+        else:
+            pos_k = torch.arange(lk, device=q.device)
+            causal = pos_k[None, :] <= q_pos[:, None]
+            in_win = q_pos[:, None] - pos_k[None, :] < self.window
         scores = scores.masked_fill(~(causal & in_win)[None, None], float("-inf"))
         out = torch.softmax(scores, dim=-1) @ v
         return _join_heads(out)
@@ -190,12 +201,16 @@ class HybridAttention(nn.Module):
         k_bank = rope_at_positions(raw, anchors, dh, self.rope_base)
         return k_bank, raw
 
-    def _compressed(self, q: Tensor, k_kv: Tensor, v_kv: Tensor) -> Tensor:
+    def _compressed(
+        self, q: Tensor, k_kv: Tensor, v_kv: Tensor, q_pos: Tensor | None = None
+    ) -> Tensor:
         """Compressed global: token t reads summary anchors <= t.
 
         q: (B, H, L, Dh) head-major; k_kv/v_kv: (B, KV, L, Dh) un-expanded.
+        ``q_pos`` overrides query positions; anchors derive from the key
+        length (anchors_i = i * Lk // G), matching a fresh full re-encode.
         """
-        seq_len = q.shape[2]
+        seq_len = v_kv.shape[2]
         dh = self.head_dim
         k_bank, v_bank = self._compute_summary_bank(k_kv, v_kv)
         bank_k = gqa_expand(k_bank, self.n_heads, self.n_kv_heads)  # (B, G, H, Dh)
@@ -203,38 +218,54 @@ class HybridAttention(nn.Module):
         bank_k, bank_v = bank_k.transpose(1, 2), bank_v.transpose(1, 2)  # (B, H, G, Dh)
         anchors = _anchors(seq_len, self.n_summary).to(q.device)
         scores = q @ bank_k.transpose(-1, -2) / math.sqrt(dh)  # (B, H, L, G)
-        readable = anchors[None, :] <= torch.arange(seq_len, device=q.device)[:, None]  # (L, G)
+        if q_pos is None:
+            readable = anchors[None, :] <= torch.arange(seq_len, device=q.device)[:, None]
+        else:
+            readable = anchors[None, :] <= q_pos[:, None]
         scores = scores.masked_fill(~readable[None, None], float("-inf"))
         out = torch.softmax(scores, dim=-1) @ bank_v
         return _join_heads(out)
 
-    def _selective(self, q: Tensor, k: Tensor, v: Tensor, x: Tensor) -> Tensor:
+    def _selective(
+        self, q: Tensor, k: Tensor, v: Tensor, x: Tensor, q_pos: Tensor | None = None
+    ) -> Tensor:
         """Hard top-k attention where selection ranks come from the indexer.
 
-        Selection: indexer token-importance scores (per token, shared by all
-        heads) causally masked then top-k per query -> boolean selector.
-        Attention: standard rope'd q.k scores over the chosen support
-        (positions outside the selector get -inf; gradients flow via the
-        gathered values path, i.e. through whatever the selection picks).
+        Selection (M4-frozen semantics): indexer token-importance scores of
+        each QUERY token (constant per query row) causally masked then top-k
+        per query -> boolean selector; ties resolve by index as in the full
+        path, so decode rows reproduce recompute rows. Attention: standard
+        rope'd q.k scores over the chosen support.
+        ``q_pos`` overrides query positions.
         """
-        b, h, seq_len, dh = q.shape
-        ranks = self.indexer(x).squeeze(-1)  # (B, L)
-        t_pos = torch.arange(seq_len, device=q.device)
-        causal = t_pos[None, :] <= t_pos[:, None]  # (q_t, cand j)
-        rank_mat = ranks[:, :, None].expand(b, seq_len, seq_len)
-        rank_mat = rank_mat.masked_fill(~causal[None], float("-inf"))  # (B, L, L)
-        k_sel = min(self.topk, seq_len)
-        top = torch.topk(rank_mat, k_sel, dim=-1).indices  # (B, L, k)
-        selector = torch.zeros(b, seq_len, seq_len, device=q.device).scatter_(2, top, 1.0).bool()
+        b, h, lq, dh = q.shape
+        lk = k.shape[2]
+        ranks_q = self.indexer(x).squeeze(-1)  # (B, lq): x = pre-norm input for rows
+        if q_pos is None:
+            t_pos = torch.arange(lk, device=q.device)
+            q_pos = t_pos
+        k_pos = torch.arange(lk, device=q.device)
+        causal = k_pos[None, :] <= q_pos[:, None]  # (q_t, cand j)
+        rank_mat = ranks_q[:, :, None].expand(b, lq, lk)
+        rank_mat = rank_mat.masked_fill(~causal[None], float("-inf"))  # (B, lq, lk)
+        k_sel = min(self.topk, lk)
+        top = torch.topk(rank_mat, k_sel, dim=-1).indices  # (B, lq, k)
+        selector = torch.zeros(b, lq, lk, device=q.device).scatter_(2, top, 1.0).bool()
 
-        scores = q @ k.transpose(-1, -2) / math.sqrt(dh)  # (B, H, L, L)
-        allow = (selector & causal)[:, None]  # (B, 1, L, L) broadcast over heads
+        scores = q @ k.transpose(-1, -2) / math.sqrt(dh)  # (B, H, lq, lk)
+        allow = (selector & causal)[:, None]  # (B, 1, lq, lk) broadcast over heads
         scores = scores.masked_fill(~allow, float("-inf"))
-        out = torch.softmax(scores, dim=-1) @ v  # (B, H, L, Dh)
+        out = torch.softmax(scores, dim=-1) @ v  # (B, H, lq, Dh)
         return _join_heads(out)
 
     # ------------------------------------------------------------------ forward
-    def forward(self, x: Tensor, *, return_branches: bool = False) -> dict | Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        return_branches: bool = False,
+        decode_caches: dict[str, Tensor] | None = None,
+    ) -> dict | Tensor:
         """Full-sequence forward; `return_branches=True` exposes per-branch
         outputs and gate weights (dict) for tests and training-time logging.
 
@@ -242,6 +273,10 @@ class HybridAttention(nn.Module):
         sequence length L (anchor_i = i * L / G), so its outputs for a
         prefix of one run are not the prefix outputs of another run — the
         sliding and selective branches are length-independent in prefix.
+
+        ``decode_caches`` (prefill capture): given a dict, this call is a
+        PREFILL — the training math runs unchanged and rope'd keys, values
+        and indexer ranks are exported into it for the per-token step path.
         """
         b, seq_len, _ = x.shape
         k, v = self._split_kv(self.kv_proj(x))
@@ -264,6 +299,10 @@ class HybridAttention(nn.Module):
             + weights[..., 2:3] * b_se
         )
         out = x + self.dropout(self.out_proj(mixed))
+        if decode_caches is not None:
+            decode_caches["k_c"] = k.detach()
+            decode_caches["v_c"] = v.detach()
+            decode_caches["ranks"] = self.indexer(x).squeeze(-1).detach()
         if return_branches:
             return {
                 "out": out,
@@ -272,4 +311,57 @@ class HybridAttention(nn.Module):
                 "selective": b_se,
                 "gate": weights,
             }
+        return out
+
+    def step_branches(
+        self, x_one: Tensor, caches: dict[str, Tensor], position: int
+    ) -> Tensor:
+        """One-token decode step; training-math equivalent.
+
+        x_one: (B, 1, D) pre-norm input; ``caches`` holds rope'd keys
+        (B, T, KV, Dh), values (B, T, KV, Dh), and indexer ranks (B, T)
+        from prefill/steps; ``position`` is the query's absolute index.
+        The compressed bank is rebuilt over the full cached context
+        (anchor'ed at the key length, matching a fresh full re-encode).
+        Mutates ``caches`` with the token's own k/v/rank.
+        """
+        dh = self.head_dim
+        half = dh // 2
+        k_new, v_new = self._split_kv(self.kv_proj(x_one))
+        k_new = rope_at_positions(
+            k_new, torch.tensor([position], device=x_one.device), dh, self.rope_base
+        )
+        k_c = torch.cat([caches["k_c"], k_new], dim=1)
+        v_c = torch.cat([caches["v_c"], v_new], dim=1)
+        ranks_c = torch.cat([caches["ranks"], self.indexer(x_one).squeeze(-1)], dim=1)
+
+        # RoPE at the single absolute query position (matches rope_cos_sin
+        # table entries exactly: same reciprocal-frequency definition).
+        inv_freq = self.rope_base ** (-2.0 * torch.arange(half, device=x_one.device) / dh)
+        pos_ang = float(position) * inv_freq
+        ang, ang_sin = pos_ang.cos(), pos_ang.sin()
+
+        def rope_q_at_pos(q: Tensor) -> Tensor:
+            # q: (B, H, 1, Dh) -> rotate-half at one absolute position
+            q1, q2 = q[..., :half], q[..., half:]
+            return torch.cat([q1 * ang - q2 * ang_sin, q2 * ang + q1 * ang_sin], dim=-1)
+
+        q_sl = rope_q_at_pos(self._proj_q("q_sliding", x_one))
+        q_co = rope_q_at_pos(self._proj_q("q_compressed", x_one))
+        q_se = rope_q_at_pos(self._proj_q("q_selective", x_one))
+
+        k_h, v_h = self._head_kv(k_c, v_c)
+        q_positions = torch.full((1,), float(position), device=x_one.device)
+        b_sl = self._sliding(q_sl, k_h, v_h, q_pos=q_positions)
+        b_co = self._compressed(q_co, k_c.transpose(1, 2), v_c.transpose(1, 2), q_pos=q_positions)
+        b_se = self._selective(q_se, k_h, v_h, x_one, q_pos=q_positions)
+
+        weights = self.gate(x_one).softmax(dim=-1)  # (B, 1, 3)
+        mixed = (
+            weights[..., 0:1] * b_sl
+            + weights[..., 1:2] * b_co
+            + weights[..., 2:3] * b_se
+        )
+        out = x_one + self.dropout(self.out_proj(mixed))
+        caches["k_c"], caches["v_c"], caches["ranks"] = k_c, v_c, ranks_c
         return out

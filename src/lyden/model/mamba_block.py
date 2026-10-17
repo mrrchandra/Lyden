@@ -59,6 +59,11 @@ class MambaBlock(nn.Module):
             d_conv=d_conv,
             expand=expand,
             layer_idx=layer_idx,
+            # Same algebra for training, cache prefill, and single-token steps:
+            # the fused mem-eff path and the manual decomposition differ numerically
+            # (~1e-2 in the residual chain), which would break exact decode-vs-recompute
+            # equivalences; keep both on the manual causal-conv1d + chunk-scan path.
+            use_mem_eff_path=False,
         )
         self.dropout = nn.Dropout(dropout)
         self.layer_idx = layer_idx

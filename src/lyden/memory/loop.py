@@ -1,9 +1,14 @@
-"""CLM generation loop: full-recompute decode with edit-command handling.
+"""CLM generation loop with edit-command handling.
 
 Flow (spec 4.6): after a generation step, check for edit commands; apply them
-to the RAM buffer; re-tokenize (v1: full recompute per step/edit); continue
-generation with the updated buffer. Editing mid-context never invalidates a
-KV cache in v1 because we recompute the whole buffer after each edit.
+to the RAM buffer; re-tokenize; continue generation with the updated buffer.
+The per-token engine is chosen by model capability:
+
+- stateful (M9 real model, CUDA): ``prefill`` once per context build, then
+  single-token steps; an edit re-prefills from the updated buffer (KV state
+  must correspond exactly to the rendered buffer, so re-prefill is the
+  correctness policy).
+- stateless (scripted/models without ``blocks``): full recompute per step.
 
 Design decision (documented): the model's generated PROSE is part of the
 live context, so it is folded into the buffer when an edit interrupts
@@ -14,16 +19,67 @@ final visible text.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 
 import torch
 
 from lyden.memory.commands import CLOSE, OPEN, apply_edit, consume_edit_commands
 from lyden.memory.context_buffer import ContextBuffer
+from lyden.model.decode import DecodeState, prefill, step
+from lyden.model.model import LydenModel
 
 EDIT_COMPLETION_BUDGET = 96
 
 
-def _sample_next(logits: torch.Tensor, temperature: float, top_k: int | None) -> int:
+class _StatefulCtx:
+    """M9 decode engine: prefill + per-token steps."""
+
+    def __init__(self, model: torch.nn.Module, tokenizer: object, device: torch.device):
+        self._model = cast(LydenModel, model)
+        self._tokenizer = tokenizer
+        self._device = device
+        self.state: DecodeState | None = None
+        self.logits: torch.Tensor | None = None
+        self.cur_ids: torch.Tensor | None = None
+
+    def start(self, buffer: ContextBuffer) -> None:
+        self.cur_ids = _ids(buffer, self._tokenizer, self._device)
+        self.state, self.logits = prefill(self._model, self.cur_ids)
+
+    def advance(self, nxt: int) -> None:
+        assert self.state is not None
+        self.logits = step(self._model, self.state, nxt)
+
+    def restart(self, buffer: ContextBuffer) -> None:
+        self.start(buffer)
+
+
+class _RecomputeCtx:
+    """Fallback engine: full forward over the whole context per token."""
+
+    def __init__(self, model: torch.nn.Module, tokenizer: object, device: torch.device):
+        self._model = model
+        self._tokenizer = tokenizer
+        self._device = device
+        self.cur_ids: torch.Tensor | None = None
+        self.logits: torch.Tensor | None = None
+
+    def start(self, buffer: ContextBuffer) -> None:
+        self.cur_ids = _ids(buffer, self._tokenizer, self._device)
+        self.logits = self._model(self.cur_ids)  # type: ignore[operator]
+
+    def advance(self, nxt: int) -> None:
+        assert self.cur_ids is not None
+        self.cur_ids = torch.cat(
+            [self.cur_ids, torch.tensor([[nxt]], device=self._device)], dim=1
+        )
+        self.logits = self._model(self.cur_ids)  # type: ignore[operator]
+
+    def restart(self, buffer: ContextBuffer) -> None:
+        self.start(buffer)
+
+
+def _sample_from_logits(logits: torch.Tensor, temperature: float, top_k: int | None) -> int:
     last = logits[0, -1].float()
     if temperature <= 0.0:
         return int(torch.argmax(last).item())
@@ -34,10 +90,6 @@ def _sample_next(logits: torch.Tensor, temperature: float, top_k: int | None) ->
         last = torch.where(last < thr, float("-inf"), last)
     probs = torch.softmax(last, dim=-1)
     return int(torch.multinomial(probs, 1).item())
-
-
-def _append(cur_ids: torch.Tensor, nxt: int) -> torch.Tensor:
-    return torch.cat([cur_ids, torch.tensor([[nxt]], device=cur_ids.device)], dim=1)
 
 
 def _ids(buffer: ContextBuffer, tokenizer: object, device: torch.device) -> torch.Tensor:
@@ -74,15 +126,21 @@ def generate_with_clm(
     for cmd in cmds:
         apply_edit(buffer, cmd, summarizer=summarizer)
 
-    cur_ids = _ids(buffer, tokenizer, device)
+    has_split = getattr(model, "blocks", None) is not None
+    ctx = (
+        _StatefulCtx(model, tokenizer, device)
+        if has_split
+        else _RecomputeCtx(model, tokenizer, device)
+    )
+    ctx.start(buffer)
     gen_ids: list[int] = []
     ids_left = max_new_tokens
     edits_done = 0
 
     while ids_left > 0:
-        logits = model(cur_ids)
-        nxt = _sample_next(logits, temperature, top_k)
-        cur_ids = _append(cur_ids, nxt)
+        assert ctx.logits is not None
+        nxt = _sample_from_logits(ctx.logits, temperature, top_k)
+        ctx.advance(nxt)
         gen_ids.append(nxt)
         ids_left -= 1
         if nxt in break_on:
@@ -96,9 +154,9 @@ def generate_with_clm(
             break
         close_ids: list[int] = tokenizer.encode(CLOSE)  # type: ignore[attr-defined]
         for _ in range(EDIT_COMPLETION_BUDGET):
-            logits = model(cur_ids)
-            nxt = _sample_next(logits, temperature, top_k)
-            cur_ids = _append(cur_ids, nxt)
+            assert ctx.logits is not None
+            nxt = _sample_from_logits(ctx.logits, temperature, top_k)
+            ctx.advance(nxt)
             gen_ids.append(nxt)
             ids_left -= 1
             if nxt in break_on:
@@ -122,8 +180,8 @@ def generate_with_clm(
             results.append(apply_edit(buffer, cmd, summarizer=summarizer))
         for r in results:
             buffer.write(f"[edit-{edits_done}] {r}")
-        # Rebuild context from the updated buffer (v1: full recompute).
-        cur_ids = _ids(buffer, tokenizer, device)
+        # Rebuild context state from the updated buffer.
+        ctx.restart(buffer)
         gen_ids = []
 
     # Fold any trailing prose into the buffer and return the full context.

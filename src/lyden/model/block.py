@@ -30,6 +30,7 @@ class LydenBlock(nn.Module):
     def __init__(self, kind: str, cfg: ModelConfig, layer_idx: int) -> None:
         super().__init__()
         self.kind = kind
+        self.layer_idx = layer_idx
         dim = cfg.dim
         self.mixer: nn.Module  # MambaBlock | HybridAttention
         self.ffn: nn.Module  # DenseFFN | MoE
@@ -69,25 +70,45 @@ class LydenBlock(nn.Module):
         mixer_cache: BlockCacheKind = None,
         seq_idx: Tensor | None = None,
         collect_moe_stats: bool = False,
+        decode_caches: dict[str, Tensor] | None = None,
+        decode_query_pos: int | None = None,
     ) -> Tensor | tuple[Tensor, dict[str, Any]]:
         """Training-semantics forward.
 
         ``mixer_cache``/``seq_idx`` are honored for mamba blocks (recurrent
         decode at inference); attention blocks accept no cache yet (decode
         wiring arrives with the generation loop).
+
+        Decode hooks (attention blocks only):
+        ``decode_caches`` — prefill capture (export k/v/ranks after the
+        normal math);
+        ``decode_query_pos`` — per-token step (attention runs its cached
+        step path; mamba blocks receiving it is an error).
         """
+        if decode_query_pos is not None and self.kind != "a":
+            raise ValueError("decode_query_pos applies to attention blocks only")
+        if decode_caches is not None and self.kind != "a":
+            raise ValueError("decode_caches applies to attention blocks only")
         normed = self.norm1(x)
         if self.kind == "m":
             mixed = self.mixer(normed, cache=mixer_cache, seq_idx=seq_idx)
         else:
-            if mixer_cache is not None:
-                raise ValueError("attention blocks accept no mixer_cache yet")
-            if collect_moe_stats:
-                branches = self.mixer(normed, return_branches=True)
-                stats: dict[str, Any] = {"gate": branches["gate"]}
-                mixed = branches["out"]
+            if decode_query_pos is not None:
+                assert self.mixer is not None
+                mixed = self.mixer.step_branches(  # type: ignore[union-attr, operator]
+                    normed, decode_caches or {}, decode_query_pos
+                )
             else:
-                mixed = self.mixer(normed)
+                if mixer_cache is not None:
+                    raise ValueError("attention blocks accept no mixer_cache yet")
+                if collect_moe_stats:
+                    branches = self.mixer(  # type: ignore[union-attr]
+                        normed, return_branches=True, decode_caches=decode_caches
+                    )
+                    stats: dict[str, Any] = {"gate": branches["gate"]}  # type: ignore[index]
+                    mixed = branches["out"]
+                else:
+                    mixed = self.mixer(normed, decode_caches=decode_caches)  # type: ignore[call-arg]
         out = x + mixed
         normed2 = self.norm2(out)
         if self.kind == "a" and collect_moe_stats:
