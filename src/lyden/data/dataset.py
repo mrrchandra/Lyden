@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import json
 import warnings
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
-from typing import Callable, Iterator
 
 import numpy as np
 
@@ -40,7 +40,7 @@ class ShardIndex:
     dtype: str  # "uint16" or "uint32"
 
     @classmethod
-    def load(cls, data_dir: str | Path, split: str) -> "ShardIndex":
+    def load(cls, data_dir: str | Path, split: str) -> ShardIndex:
         """Load and validate the manifest for ``split`` under ``data_dir``."""
         base = Path(data_dir).expanduser() / split
         manifest_path = base / "manifest.json"
@@ -70,7 +70,7 @@ class ShardIndex:
             raise ValueError(f"dtype must be one of {_DTYPE_NAMES}, got {self.dtype}")
         if on_disk:
             itemsize = np.dtype(self.dtype).itemsize
-            for path, count in zip(self.shard_paths, self.tokens_per_shard):
+            for path, count in zip(self.shard_paths, self.tokens_per_shard, strict=False):
                 if not path.exists():
                     raise FileNotFoundError(f"missing shard file: {path}")
                 if path.stat().st_size != count * itemsize:
@@ -94,7 +94,7 @@ class ShardIndex:
                 f"position {global_pos} outside stream of {self.tokens_total} tokens"
             )
         for path, offset, count in zip(
-            self.shard_paths, self.shard_offsets, self.tokens_per_shard
+            self.shard_paths, self.shard_offsets, self.tokens_per_shard, strict=False
         ):
             if offset <= global_pos < offset + count:
                 return path, global_pos - offset
@@ -281,5 +281,5 @@ def iter_documents(
         edges = [*starts.tolist(), toks.size]
         if edges[0]:
             yield toks[: edges[0]]
-        for begin, end in zip(edges[:-1], edges[1:]):
+        for begin, end in zip(edges[:-1], edges[1:], strict=False):
             yield toks[begin:end]

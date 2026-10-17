@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -89,8 +90,9 @@ def test_betas_list_to_tuple() -> None:
     ],
 )
 def test_model_validation_errors(field: str, value: object) -> None:
+    kwargs: dict[str, Any] = {field: value}
     with pytest.raises(ValueError):
-        ModelConfig(**{field: value})
+        ModelConfig(**kwargs)
 
 
 def test_attention_gqa_divisibility() -> None:

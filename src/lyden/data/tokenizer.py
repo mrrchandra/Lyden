@@ -8,8 +8,8 @@ and the CLM edit/context markers so the model can emit them as native tokens.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, processors, trainers
 
@@ -39,7 +39,7 @@ class LydenTokenizer:
         sample: Iterable[str],
         vocab_size: int,
         out_dir: str | Path,
-    ) -> "LydenTokenizer":
+    ) -> LydenTokenizer:
         """Train byte-level BPE on a text sample and persist it to ``out_dir``.
 
         ``sample`` should be large enough that BPE learns reasonable merges
@@ -61,7 +61,7 @@ class LydenTokenizer:
         return out
 
     @classmethod
-    def load(cls, tokenizer_dir: str | Path) -> "LydenTokenizer":
+    def load(cls, tokenizer_dir: str | Path) -> LydenTokenizer:
         """Load a previously trained tokenizer directory."""
         tokenizer_dir = Path(tokenizer_dir).expanduser()
         path = tokenizer_dir / "tokenizer.json"

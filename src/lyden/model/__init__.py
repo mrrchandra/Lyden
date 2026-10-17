@@ -1,1 +1,5 @@
 """Model components (backbone, Mamba, attention, MoE)."""
+
+from lyden.model.mamba_block import MambaBlock
+
+__all__ = ["MambaBlock"]

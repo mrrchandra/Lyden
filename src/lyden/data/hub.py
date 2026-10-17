@@ -12,7 +12,8 @@ Public contract deliberately hides row iteration specifics behind
 from __future__ import annotations
 
 import re
-from typing import Any, Iterator, Sequence
+from collections.abc import Iterator, Sequence
+from typing import Any
 
 import pyarrow.parquet as pq
 
@@ -62,8 +63,7 @@ def iter_row_batches(
             raise KeyError(
                 f"column {column!r} missing in {path}; columns={list(pf.schema_arrow.names)}"
             )
-        for batch in pf.iter_batches(batch_size=batch_rows, columns=[column]):
-            yield batch
+        yield from pf.iter_batches(batch_size=batch_rows, columns=[column])
 
 
 def stream_texts(
@@ -74,7 +74,10 @@ def stream_texts(
     skip_empty: bool = True,
 ) -> Iterator[str]:
     """Stream text documents from the given parquet paths."""
-    to_py = lambda batch: [batch.column(0)[i].as_py() for i in range(batch.num_rows)]
+
+    def to_py(batch: Any) -> list[str]:
+        return [batch.column(0)[i].as_py() for i in range(batch.num_rows)]
+
     for batch in iter_row_batches(paths, column, batch_rows):
         for value in to_py(batch):
             if value is None:
