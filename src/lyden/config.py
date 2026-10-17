@@ -70,6 +70,7 @@ class MoEConfig:
     expert_hidden: int = 1024
     balance: str = "loss_free"  # "loss_free" (DeepSeek-style bias) or "aux" (Switch-style)
     aux_loss_weight: float = 0.01
+    bias_gamma: float = 0.001  # loss-free bias adjustment step size
 
     def __post_init__(self) -> None:
         if self.top_k < 1:
@@ -82,6 +83,11 @@ class MoEConfig:
             )
         if self.balance not in ("loss_free", "aux"):
             raise ValueError(f"balance must be 'loss_free' or 'aux', got '{self.balance}'")
+        if self.aux_loss_weight < 0 or self.bias_gamma <= 0:
+            raise ValueError(
+                f"aux_loss_weight ({self.aux_loss_weight}) must be >= 0 and "
+                f"bias_gamma ({self.bias_gamma}) must be > 0"
+            )
 
 
 @dataclass
