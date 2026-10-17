@@ -217,9 +217,9 @@ def _env_record_content():
 
 # ---------------------------------------------------------------- CLI deps
 def _tokenizer_lib():
-    from tokenizers import Tokenizer
+    import tokenizers
 
-    assert Tokenizer
+    assert tokenizers.Tokenizer is not None
     return "tokenizers importable"
 
 
