@@ -84,7 +84,9 @@ def main() -> None:
     for param in params:
         param.grad = torch.full_like(param, 0.25)
     if rank == 1:
-        params[0].grad[0] = float("inf")
+        g0 = params[0].grad
+        assert g0 is not None
+        g0[0] = float("inf")
     grad_norm = trainer._dist_clip_and_step()
     assert np.isnan(grad_norm), f"rank{rank}: expected skipped-step NaN, got {grad_norm}"
     assert trainer.dist_scale == 32768.0, f"rank{rank}: scale {trainer.dist_scale}"
