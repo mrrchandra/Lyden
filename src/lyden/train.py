@@ -158,8 +158,9 @@ class Trainer:
         for _ in range(accum):
             x, y = self.train_batcher.next_batch()
             loss, stats = self._forward_loss(x, y)
-            (loss / accum).backward()
-            total_loss += float(loss)
+            raw = loss / accum
+            (self.scaler.scale(raw) if self.scaler.is_enabled() else raw).backward()
+            total_loss += float(loss.detach())
             tokens += x.numel()
             merge_stats(agg, stats, scale=1.0 / accum)
         grad_norm = self._clip_and_step()

@@ -139,6 +139,22 @@ def test_amp_bf16_step_running() -> None:
     assert np.isfinite(info["loss"])
 
 
+@requires_gpu
+def test_amp_fp16_scaler_steps_run() -> None:
+    """fp16 + GradScaler path: loss must be SCALED before backward (M10 Kaggle T4).
+
+    Regression: unscale_() asserted because step() backpropagated the raw loss
+    and the scaler had never scaled anything.
+    """
+    tr = trainer_for(amp="fp16", total_steps=40, warmup_steps=5)
+    info = tr.step()
+    assert np.isfinite(info["loss"])
+    assert info["grad_norm"] >= 0.0
+    # Steady state: a second step through the same scaler instance.
+    info = tr.step()
+    assert np.isfinite(info["loss"])
+
+
 # --------------------------------------------------------- checkpoints
 @requires_gpu
 def test_checkpoint_resume_matches_full_run(tmp_path: Path) -> None:
