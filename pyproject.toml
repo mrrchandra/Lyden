@@ -40,6 +40,7 @@ addopts = "-ra"
 [tool.ruff]
 line-length = 100
 src = ["src", "tests", "scripts"]
+extend-exclude = ["kaggle"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

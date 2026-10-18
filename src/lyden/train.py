@@ -47,12 +47,20 @@ class Trainer:
         train_batcher: Any,
         val_batcher: Any | None = None,
         device: str = "cuda",
+        dist_rank: int = 0,
+        dist_world: int = 1,
+        dist_backend: str = "nccl",
     ) -> None:
+        if not 0 <= dist_rank < dist_world:
+            raise ValueError(f"dist_rank {dist_rank} out of range for dist_world {dist_world}")
         self.cfg = cfg
         self.model = model
         self.train_batcher = train_batcher
         self.val_batcher = val_batcher
         self.device = device
+        self.dist_rank = int(dist_rank)
+        self.dist_world = int(dist_world)
+        self.dist_backend = dist_backend
         self.amp_dtype = {
             "bf16": torch.bfloat16,
             "fp16": torch.float16,
@@ -174,9 +182,31 @@ class Trainer:
             "warnings": warnings,
         }
 
+    def _sync_grads(self) -> None:
+        """Average gradients across ranks before clipping (manual DDP).
+
+        Gradients accumulate locally for ``grad_accum`` micro-batches; only the
+        pre-step gradient is reduced, once. Averaging (sum / world) makes the
+        combined ranks' gradient equal the global-batch mean gradient.
+        """
+        if self.dist_world <= 1 or not torch.distributed.is_initialized():
+            return
+        for param in self.model.parameters():
+            if param.grad is None:
+                continue
+            if self.dist_backend == "nccl" and param.grad.is_cuda:
+                torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.SUM)
+                param.grad.div_(self.dist_world)
+            else:
+                staged = param.grad.detach().to("cpu")
+                torch.distributed.all_reduce(staged, op=torch.distributed.ReduceOp.SUM)
+                staged.div_(self.dist_world)
+                param.grad.copy_(staged.to(param.grad.device))
+
     def _clip_and_step(self) -> float:
         if self.scaler.is_enabled():
             self.scaler.unscale_(self.opt)
+        self._sync_grads()
         grad_norm = float(
             torch.nn.utils.clip_grad_norm_(
                 [p for p in self.model.parameters() if p.requires_grad],
@@ -237,7 +267,10 @@ class Trainer:
         config_yaml = yaml.safe_dump(to_dict(self.cfg), default_flow_style=False, sort_keys=False)
         payload["config_yaml"] = config_yaml
         if hasattr(self.train_batcher, "state_dict"):
-            payload["batcher"] = self.train_batcher.state_dict()
+            if self.dist_world <= 1:
+                payload["batcher"] = self.train_batcher.state_dict()
+            else:
+                payload[f"batcher_rank{self.dist_rank}"] = self.train_batcher.state_dict()
         torch.save(payload, path)
         self._prune_keep_last()
         return path
@@ -255,8 +288,22 @@ class Trainer:
         self.sched.load_state_dict(payload["scheduler"])
         self.scaler.load_state_dict(payload["scaler"])
         self.global_step = int(payload["step"])
-        if "batcher" in payload and hasattr(self.train_batcher, "load_state_dict"):
-            self.train_batcher.load_state_dict(payload["batcher"])
+        if hasattr(self.train_batcher, "load_state_dict"):
+            key = "batcher" if self.dist_world <= 1 else f"batcher_rank{self.dist_rank}"
+            if key not in payload:
+                if self.dist_world <= 1 and "batcher" in payload:
+                    self.train_batcher.load_state_dict(payload["batcher"])
+                else:
+                    # Resuming a DDP run from a single-GPU checkpoint: loading
+                    # that shared sampler state would make ranks sample
+                    # identical windows, so each rank keeps its own fresh
+                    # (rank-shifted) stream position instead.
+                    print(
+                        f"[resume] no batcher_rank{self.dist_rank} in checkpoint; "
+                        "each rank keeps its own sampler state"
+                    )
+                return
+            self.train_batcher.load_state_dict(payload[key])
         torch.set_rng_state(payload["rng"]["torch"].cpu())
         torch.cuda.set_rng_state_all([s.cpu() for s in payload["rng"]["cuda"]])
         np.random.set_state(payload["rng"]["numpy"])
