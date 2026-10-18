@@ -177,7 +177,9 @@ class HybridAttention(nn.Module):
             pos_k = torch.arange(lk, device=q.device)
             causal = pos_k[None, :] <= q_pos[:, None]
             in_win = q_pos[:, None] - pos_k[None, :] < self.window
-        scores = scores.masked_fill(~(causal & in_win)[None, None], float("-inf"))
+        # In-place fill: the score tensor is single-use here, so we avoid
+        # materializing a second (B, H, L, L) copy at every call.
+        scores.masked_fill_(~(causal & in_win)[None, None], float("-inf"))
         out = torch.softmax(scores, dim=-1) @ v
         return _join_heads(out)
 
@@ -195,7 +197,7 @@ class HybridAttention(nn.Module):
         s = s_tok.transpose(1, 2)  # (B, KV, G, Dh)
         scores = s @ k_kv.transpose(-1, -2) / math.sqrt(dh)  # (B, KV, G, L)
         allowed_g = torch.arange(seq_len, device=k_kv.device) <= anchors[:, None]  # (G, L)
-        scores = scores.masked_fill(~allowed_g[None, None], float("-inf"))
+        scores.masked_fill_(~allowed_g[None, None], float("-inf"))
         rep = torch.softmax(scores, dim=-1) @ v_kv  # (B, KV, G, Dh)
         raw = rep.permute(0, 2, 1, 3)  # (B, G, KV, Dh)
         k_bank = rope_at_positions(raw, anchors, dh, self.rope_base)
@@ -222,7 +224,7 @@ class HybridAttention(nn.Module):
             readable = anchors[None, :] <= torch.arange(seq_len, device=q.device)[:, None]
         else:
             readable = anchors[None, :] <= q_pos[:, None]
-        scores = scores.masked_fill(~readable[None, None], float("-inf"))
+        scores.masked_fill_(~readable[None, None], float("-inf"))
         out = torch.softmax(scores, dim=-1) @ bank_v
         return _join_heads(out)
 
@@ -246,15 +248,21 @@ class HybridAttention(nn.Module):
             q_pos = t_pos
         k_pos = torch.arange(lk, device=q.device)
         causal = k_pos[None, :] <= q_pos[:, None]  # (q_t, cand j)
-        rank_mat = ranks_q[:, :, None].expand(b, lq, lk)
-        rank_mat = rank_mat.masked_fill(~causal[None], float("-inf"))  # (B, lq, lk)
+        # torch.where writes one contiguous rank matrix (kept in the ranks'
+        # dtype so the fill can't silently promote to fp32; ties resolve by
+        # index order within the same path, so decode parity with the
+        # recompute path is preserved: both feed identical ranks).
+        neg_inf_fill = torch.full_like(ranks_q, float("-inf"))  # (B, lq)
+        rank_mat = torch.where(causal[None], ranks_q[:, :, None], neg_inf_fill[:, :, None])
         k_sel = min(self.topk, lk)
         top = torch.topk(rank_mat, k_sel, dim=-1).indices  # (B, lq, k)
-        selector = torch.zeros(b, lq, lk, device=q.device).scatter_(2, top, 1.0).bool()
+        selector = torch.zeros(b, lq, lk, dtype=torch.bool, device=q.device).scatter_(
+            2, top, True
+        )
 
         scores = q @ k.transpose(-1, -2) / math.sqrt(dh)  # (B, H, lq, lk)
         allow = (selector & causal)[:, None]  # (B, 1, lq, lk) broadcast over heads
-        scores = scores.masked_fill(~allow, float("-inf"))
+        scores.masked_fill_(~allow, float("-inf"))
         out = torch.softmax(scores, dim=-1) @ v  # (B, H, lq, Dh)
         return _join_heads(out)
 

@@ -151,6 +151,7 @@ class TrainingConfig:
     amp: str = "bf16"  # "bf16", "fp16", or "fp32"
     seq_len: int = 2048
     batch_size: int = 8
+    activation_checkpoint: bool = False
     checkpoint_every: int = 5000
     keep_last: int = 3
     log_every: int = 10

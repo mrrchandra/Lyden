@@ -120,7 +120,9 @@ class Trainer:
         x = x.to(self.device, non_blocking=True)
         y = y.to(self.device, non_blocking=True)
         with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
-            logits, stats = self.model(x, collect_stats=True)
+            logits, stats = self.model(
+                x, collect_stats=True, grad_ckpt=self.cfg.training.activation_checkpoint
+            )
             loss = torch.nn.functional.cross_entropy(
                 logits.float().view(-1, logits.shape[-1]), y.view(-1)
             )

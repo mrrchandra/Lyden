@@ -81,8 +81,15 @@ def fmt_moe(stats: dict[str, Any], layer: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="absolute step bound for THIS process (chunked runs resume "
+        "automatically; the scheduler is anchored to cfg total_steps)",
+    )
     parser.add_argument("--val-batches", type=int, default=20)
+    parser.add_argument("--val-every", type=int, default=600)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -97,20 +104,30 @@ def main() -> None:
         val_batcher=val_batcher,
         device=device,
     )
-    total_steps = args.max_steps if args.max_steps is not None else cfg.training.total_steps
-    trainer.total_steps = min(cfg.training.total_steps, total_steps)
+    total_steps = cfg.training.total_steps
+    bound = total_steps if args.max_steps is None else min(args.max_steps, total_steps)
     log_every = cfg.training.log_every
-    ckpt_every = max(1, min(cfg.training.checkpoint_every, total_steps // 4 or 1))
+    ckpt_every = max(1, min(cfg.training.checkpoint_every, total_steps // 10))
     print(
         f"[train] config={args.config} steps={total_steps} warmup={cfg.training.warmup_steps} "
         f"seq={cfg.training.seq_len} bs={cfg.training.batch_size} accum={cfg.training.grad_accum} "
         f"amp={cfg.training.amp}"
     )
+    # Auto-resume: continue from the latest checkpoint under the run's dir.
+    ckpts_dir = Path(cfg.training.out_dir) / cfg.run_name / "ckpts"
+    if ckpts_dir.exists():
+        candidates = sorted(ckpts_dir.glob("ckpt_*.pt"))
+        if candidates:
+            latest = candidates[-1]
+            trainer.load_checkpoint(latest)
+            print(f"[resume] {latest} (global_step={trainer.global_step})")
+
     t_start = time.perf_counter()
     val_loss = float("nan")
-    for _ in range(total_steps):
+    val_every = max(1, args.val_every)
+    while trainer.global_step < bound:
         info = trainer.step()
-        if info["step"] % log_every == 0 or info["step"] == total_steps:
+        if info["step"] % log_every == 0 or info["step"] == bound:
             tok_s = info["tokens_per_s"]
             print(
                 f"step {info['step']:>6d} | loss {info['loss']:.4f} | val {val_loss:.4f} | "
@@ -119,16 +136,16 @@ def main() -> None:
             )
             for warn in info["warnings"]:
                 print(f"  [warn] {warn}")
-        if info["step"] % max(1, total_steps // 4) == 0 or info["step"] == total_steps:
+        if info["step"] % val_every == 0 or info["step"] == total_steps:
             val_loss = trainer.validate(args.val_batches)
             print(f"  [val] step {info['step']}: loss {val_loss:.4f}")
-        if info["step"] % ckpt_every == 0 or info["step"] == total_steps:
+        if info["step"] % ckpt_every == 0 or info["step"] == bound:
             path = trainer.save_checkpoint()
             print(f"  [ckpt] step {info['step']} -> {path}")
     dt = time.perf_counter() - t_start
     print(
-        f"[done] {int(total_steps)} steps in {dt/60:.1f} min | final loss {info['loss']:.4f} "
-        f"| val {val_loss:.4f}"
+        f"[done] reached step {trainer.global_step} in {dt/60:.1f} min "
+        f"(this process) | loss {info['loss']:.4f} | val {val_loss:.4f}"
     )
 
 
