@@ -1,0 +1,40 @@
+# Lyden 100M config for Kaggle T4 environments (2x T4; fp16 tensor cores).
+# Identical schedule to 100m.yaml: 32,768 tokens/step, 7,600 steps (~250M tokens).
+model:
+  vocab_size: 32768
+  dim: 512
+  n_layers: 16
+  layer_pattern: "mmma"
+  mamba: {d_state: 128, d_conv: 4, expand: 2}
+  attention: {n_heads: 8, n_kv_heads: 2, window: 512, n_summary: 64, topk: 256, rope_base: 10000.0}
+  dense_ffn: {hidden: 2048, activation: "swiglu"}
+  moe: {n_routed: 8, n_shared: 2, top_k: 2, expert_hidden: 512, balance: "loss_free", aux_loss_weight: 0.01}
+  dropout: 0.0
+  weight_tying: true
+training:
+  lr: 4.0e-4
+  trunk_lr_mult: 0.1
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  grad_clip: 1.0
+  warmup_steps: 400
+  total_steps: 7600
+  grad_accum: 2
+  amp: "fp16"
+  seq_len: 1024
+  batch_size: 16
+  activation_checkpoint: true
+  checkpoint_every: 200
+  keep_last: 3
+  log_every: 10
+  log_backend: "console"
+  out_dir: "runs"
+data:
+  dataset: "tinystories"
+  data_dir: "/kaggle/working/lyden-data"
+  tokenizer_dir: "/kaggle/working/lyden-data/tokenizer"
+  val_fraction: 0.01
+clm:
+  buffer_max_chars: 20000
+seed: 1337
+run_name: "100m"
