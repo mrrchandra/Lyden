@@ -120,6 +120,35 @@ run_name: "ddp_smoke"
 """
 
 
+def test_two_rank_fp16_scale_lockstep() -> None:
+    """fp16 + DDP: one rank's overflow must not diverge the world (M10 fix).
+
+    Regression for the Kaggle casualty chain: per-param all-reduce skipped
+    grads per rank (queues desynced) and a per-rank GradScaler would step on
+    one rank while the other skipped. The driver asserts both ranks take the
+    identical skip/step decisions under the flat-sync + shared-scale path.
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc-per-node=2",
+            str(ROOT / "tests" / "_ddp_fp16_driver.py"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env={**os.environ, "OMP_NUM_THREADS": "1"},
+        cwd=str(ROOT),
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert out.count("[fp16-scale-lockstep] ok") == 1, out
+    assert out.count("assert") == 0, out
+
+
 def test_train_py_two_rank_smoke() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path = Path(tmp) / "ddp_smoke.yaml"

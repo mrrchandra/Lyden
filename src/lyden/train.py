@@ -8,8 +8,10 @@ Split-LR grouping (spec §4): parameters whose name matches
 at ``trunk_lr_mult`` × base. Weight decay applies to tensors with ndim > 1
 only (norms/biases get 0.0).
 
-Precision: bf16 autocast (fp16 + GradScaler fallback; fp32 disables AMP).
-SSM state stays fp32 inside the mamba kernel.
+Precision: bf16 autocast; fp16 via GradScaler on a single device and via a
+world-shared Megatron-style loss scale under manual DDP (the synced-gradient
+overflow check keeps every rank's skip/step decision identical); fp32 disables
+AMP. SSM state stays fp32 inside the mamba kernel.
 
 Stability monitors (train path): expert collapse (any routed-expert load >
 50%), attention gate collapse (max gate weight > 0.9), and loss spikes (loss
@@ -67,7 +69,17 @@ class Trainer:
             "fp32": torch.float32,
         }[cfg.training.amp]
         self.use_amp = self.amp_dtype != torch.float32
-        self.scaler = torch.amp.GradScaler("cuda", enabled=cfg.training.amp == "fp16")
+        # Under manual DDP the loss scale must be a world-shared value: a
+        # per-rank GradScaler records found_inf locally, so one rank could
+        # step while the other skips (diverged weights) and scale updates
+        # would diverge too. The decision is made on the SYNCED gradients
+        # instead (see _dist_clip_and_step).
+        self.use_dist_scale = self.dist_world > 1 and cfg.training.amp == "fp16"
+        self.dist_scale = 65536.0
+        self._scale_growth_tracker = 0
+        self.scaler = torch.amp.GradScaler(
+            "cuda", enabled=cfg.training.amp == "fp16" and not self.use_dist_scale
+        )
         self.total_steps = cfg.training.total_steps
         self.global_step = 0
         self.recent_losses: list[float] = []
@@ -159,7 +171,11 @@ class Trainer:
             x, y = self.train_batcher.next_batch()
             loss, stats = self._forward_loss(x, y)
             raw = loss / accum
-            (self.scaler.scale(raw) if self.scaler.is_enabled() else raw).backward()
+            if self.scaler.is_enabled():
+                raw = self.scaler.scale(raw)
+            elif self.use_dist_scale:
+                raw = raw * self.dist_scale
+            raw.backward()
             total_loss += float(loss.detach())
             tokens += x.numel()
             merge_stats(agg, stats, scale=1.0 / accum)
@@ -183,31 +199,68 @@ class Trainer:
             "warnings": warnings,
         }
 
-    def _sync_grads(self) -> None:
-        """Average gradients across ranks before clipping (manual DDP).
+    def _sync_grads(self) -> torch.Tensor:
+        """Zero-fill missing grads, flatten, one all-reduce (SUM) — returns the flat buffer.
 
-        Gradients accumulate locally for ``grad_accum`` micro-batches; only the
-        pre-step gradient is reduced, once. Averaging (sum / world) makes the
-        combined ranks' gradient equal the global-batch mean gradient.
+        Zero-filling before flattening makes the collective sequence
+        unreachable-by-desync across ranks: MoE routing selects expert subsets
+        *per rank*, so a rank that never used an expert has ``grad is None``
+        there; with the previous per-param all-reduce the ranks skipped
+        different params and their NCCL queues misaligned (the M10 Kaggle
+        failure: a 512- and a 262144-element collective at one sequence id).
         """
         if self.dist_world <= 1 or not torch.distributed.is_initialized():
-            return
-        for param in self.model.parameters():
+            raise RuntimeError("_sync_grads requires an initialized process group")
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        for param in params:
             if param.grad is None:
-                continue
-            if self.dist_backend == "nccl" and param.grad.is_cuda:
-                torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.SUM)
-                param.grad.div_(self.dist_world)
-            else:
-                staged = param.grad.detach().to("cpu")
-                torch.distributed.all_reduce(staged, op=torch.distributed.ReduceOp.SUM)
-                staged.div_(self.dist_world)
-                param.grad.copy_(staged.to(param.grad.device))
+                param.grad = torch.zeros_like(param)
+        flat = torch._utils._flatten_dense_tensors([p.grad for p in params])  # type: ignore[attr-defined]
+        torch.distributed.all_reduce(flat, op=torch.distributed.ReduceOp.SUM)
+        return flat
+
+    def _dist_clip_and_step(self) -> float:
+        """World-consistent clip+step: average, shared fp16 scale, clip, step.
+
+        The fp16 overflow decision is taken on the SYNCED buffer (a rank-
+        invariant result), so every rank reaches the identical skip/step
+        decision and keeps the same scale value — GradScaler's per-rank
+        found_inf would let one rank step while the other skips.
+        """
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        flat = self._sync_grads()
+        flat.div_(self.dist_world)
+        if self.use_dist_scale:
+            healthy = torch.isfinite(flat).all().to(torch.float32)
+            torch.distributed.all_reduce(healthy, op=torch.distributed.ReduceOp.MIN)
+            if float(healthy) < 1.0:
+                # Overflow: identical world decision — drop this step's grads
+                # and back the shared scale off. The next step zero-fills.
+                self.dist_scale = max(self.dist_scale * 0.5, 1.0)
+                self._scale_growth_tracker = 0
+                for param in params:
+                    param.grad = None
+                return float("nan")
+            flat.div_(self.dist_scale)
+            self._scale_growth_tracker += 1
+            if self._scale_growth_tracker >= 2000 and self.dist_scale < 2.0**24:
+                self.dist_scale *= 2.0
+                self._scale_growth_tracker = 0
+        grads = torch._utils._unflatten_dense_tensors(flat, [p.grad for p in params])  # type: ignore[attr-defined]
+        for param, grad in zip(params, grads, strict=True):
+            assert param.grad is not None  # zero-filled in _sync_grads
+            param.grad.copy_(grad)
+        grad_norm = float(torch.nn.utils.clip_grad_norm_(params, self.cfg.training.grad_clip))
+        self.opt.step()
+        for param in params:
+            param.grad = None
+        return grad_norm
 
     def _clip_and_step(self) -> float:
+        if self.dist_world > 1 and torch.distributed.is_initialized():
+            return self._dist_clip_and_step()
         if self.scaler.is_enabled():
             self.scaler.unscale_(self.opt)
-        self._sync_grads()
         grad_norm = float(
             torch.nn.utils.clip_grad_norm_(
                 [p for p in self.model.parameters() if p.requires_grad],
@@ -265,6 +318,9 @@ class Trainer:
                 "python": random.getstate(),
             },
         }
+        if self.use_dist_scale:
+            payload["loss_scale"] = self.dist_scale
+            payload["scale_growth"] = self._scale_growth_tracker
         config_yaml = yaml.safe_dump(to_dict(self.cfg), default_flow_style=False, sort_keys=False)
         payload["config_yaml"] = config_yaml
         if hasattr(self.train_batcher, "state_dict"):
@@ -288,6 +344,13 @@ class Trainer:
         self.opt.load_state_dict(payload["optimizer"])
         self.sched.load_state_dict(payload["scheduler"])
         self.scaler.load_state_dict(payload["scaler"])
+        if self.use_dist_scale:
+            if "loss_scale" not in payload:
+                # Pre-dist-scale checkpoint: GradScaler used the same default.
+                print("[resume] no loss_scale in checkpoint; starting at 65536.0")
+            else:
+                self.dist_scale = float(payload["loss_scale"])
+                self._scale_growth_tracker = int(payload.get("scale_growth", 0))
         self.global_step = int(payload["step"])
         if hasattr(self.train_batcher, "load_state_dict"):
             key = "batcher" if self.dist_world <= 1 else f"batcher_rank{self.dist_rank}"
