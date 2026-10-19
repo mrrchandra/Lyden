@@ -135,3 +135,30 @@ def sample_text(
         gen.append(nxt)
         logits = step(model, state, nxt)
     return tokenizer.decode(gen, skip_special=True)  # type: ignore[attr-defined]
+
+
+# ----------------------------------------------------------- M11: fact recall
+@torch.no_grad()
+def fact_fix_recall(
+    model: LydenModel,
+    tokenizer: object,
+    sessions: list[tuple[str, str]],
+    device: str | torch.device = "cuda",
+    n_new: int = 24,
+) -> dict[str, float | int]:
+    """Deterministic (T=0) fact-fix recall over held-out CLM sessions.
+
+    For each (prompt, target): generate ``n_new`` tokens from the prompt and
+    score the expected corrected-fact answer as present in the decoded text.
+    Returns {"recall": fraction correct, "n": sessions, "matches": hits}.
+    """
+    hits = 0
+    for prompt, target in sessions:
+        text = sample_text(model, tokenizer, prompt, n_new=n_new, temperature=0.0, seed=0)
+        if target in text:
+            hits += 1
+    return {
+        "recall": hits / len(sessions) if sessions else 0.0,
+        "n": len(sessions),
+        "matches": hits,
+    }

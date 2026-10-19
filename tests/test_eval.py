@@ -88,3 +88,32 @@ def test_sample_text_prefill_step_uses_state() -> None:
 
     text = sample_text(model, _FakeTok(), "hello world", n_new=6, temperature=0.0)
     assert len(text.split()) == 6
+
+
+# ------------------------------------------------------- M11: fact-fix recall
+@requires_gpu
+def test_fact_fix_recall_plumbing_zero_on_untrained_model() -> None:
+    """A tiny model with a fake tokenizer can't produce the target text, so
+    recall is exactly 0 — the metric pipeline (prompt -> generate -> match)
+    must run end-to-end."""
+    from lyden.data.clm_sessions import heldout_sessions
+    from lyden.eval import fact_fix_recall
+    from lyden.model.model import LydenModel
+
+    class _FakeTok:
+        bos_id = 1
+        eos_id = 2
+
+        def encode(self, text: str, add_bos: bool = False) -> list[int]:
+            return [(ord(c) * 7 + 11) % 500 for c in text] or [3]
+
+        def decode(self, ids: list[int], skip_special: bool = False) -> str:
+            return "."
+
+    cfg = tiny_lyden_cfg()
+    torch.manual_seed(4)
+    model = LydenModel(cfg.model).cuda().eval()
+    session = heldout_sessions(50_000, 2)
+    res = fact_fix_recall(model, _FakeTok(), sessions=session, device="cuda", n_new=4)
+    assert res["n"] == 2
+    assert res["recall"] == 0.0
