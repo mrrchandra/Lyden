@@ -26,8 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from lyden.data.clm_sessions import synthetic_fact_session
-from lyden.data.clm_sessions import mixed_documents
+from lyden.data.clm_sessions import mixed_documents, synthetic_fact_session
 from lyden.data.dataset import ShardIndex, pretokenize
 from lyden.data.hub import list_shard_paths, stream_texts
 from lyden.data.tokenizer import LydenTokenizer

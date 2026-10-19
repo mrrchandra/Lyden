@@ -52,7 +52,10 @@ def router_snapshot(model: LydenModel, val_cfg, device) -> dict:
     for key, value in stats.items():
         if key.startswith("moe_load@"):
             layer = key.split("@")[1]
-            out[layer] = {"load_top": round(float(value.max()), 4), "mean": round(float(value.mean()), 4)}
+            out[layer] = {
+                "load_top": round(float(value.max()), 4),
+                "mean": round(float(value.mean()), 4),
+            }
         if key.startswith("moe_entropy@"):
             layer = key.split("@")[1]
             out.setdefault(layer, {})["entropy"] = round(float(value), 4)
@@ -108,9 +111,7 @@ def main() -> int:
         report["router_health"] = router_snapshot(model, cfg, device)
 
         prompt, _target = sessions[2]
-        text = sample_text(
-            model, tokenizer, prompt, n_new=60, temperature=0.0, seed=0
-        )
+        text = sample_text(model, tokenizer, prompt, n_new=60, temperature=0.0, seed=0)
         report["recall_sample"] = {"prompt_tail": prompt.splitlines()[-1], "generated": text}
 
     out_path = Path(
