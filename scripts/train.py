@@ -101,6 +101,12 @@ def main() -> None:
         help="absolute step bound for THIS process (chunked runs resume "
         "automatically; the scheduler is anchored to cfg total_steps)",
     )
+    parser.add_argument(
+        "--accum-mult",
+        type=int,
+        default=1,
+        help="multiply cfg grad_accum (world-size compensation; default 1)",
+    )
     parser.add_argument("--val-batches", type=int, default=20)
     parser.add_argument("--val-every", type=int, default=600)
     parser.add_argument(
@@ -113,6 +119,12 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.accum_mult < 1:
+        parser.error(f"--accum-mult must be >= 1, got {args.accum_mult}")
+    if args.accum_mult != 1:
+        # keeps tokens/step and the scheduler when world size differs from the
+        # config's assumed 2 ranks (e.g. single-GPU P100: mult=2 in-cell)
+        cfg.training.grad_accum *= args.accum_mult
     rank = int(os.environ.get("RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
