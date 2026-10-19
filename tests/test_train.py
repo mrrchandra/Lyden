@@ -307,3 +307,22 @@ def test_checkpoint_resume_reset_flags(tmp_path: Path) -> None:
     assert reset.sched.last_epoch == 0
     for m in _moe_modules(reset):
         assert torch.equal(m.bias, torch.zeros_like(m.bias))
+
+
+@requires_gpu
+def test_load_checkpoint_reset_flags_override(tmp_path: Path) -> None:
+    """Crash-mid-continuation semantics: trainer built with M11 reset flags
+    (config) must NOT reset when the caller says reset_flags=False (auto-
+    resume of its own phase); explicit external resume keeps cfg flags."""
+    tr = trainer_for(amp="fp32", total_steps=100, warmup_steps=10, reset_scheduler=True)
+    for _ in range(3):
+        tr.step()
+    ckpt = tr.save_checkpoint()
+
+    midrun = trainer_for(amp="fp32", total_steps=100, warmup_steps=10, reset_scheduler=True)
+    midrun.load_checkpoint(ckpt, reset_flags=False)
+    assert midrun.sched.last_epoch == 3
+
+    external = trainer_for(amp="fp32", total_steps=100, warmup_steps=10, reset_scheduler=True)
+    external.load_checkpoint(ckpt, reset_flags=True)
+    assert external.sched.last_epoch == 0

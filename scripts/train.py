@@ -103,6 +103,13 @@ def main() -> None:
     )
     parser.add_argument("--val-batches", type=int, default=20)
     parser.add_argument("--val-every", type=int, default=600)
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="explicit cross-phase checkpoint (M11 continue-train); config's "
+        "reset_scheduler/reset_moe_bias apply to THIS load only",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -150,13 +157,19 @@ def main() -> None:
             f"seq={cfg.training.seq_len} bs={cfg.training.batch_size} "
             f"accum={cfg.training.grad_accum} amp={cfg.training.amp} world={world}"
         )
-    # Auto-resume: continue from the latest checkpoint under the run's dir.
+    # Explicit cross-phase resume (M11): config reset flags apply.
+    if args.resume is not None:
+        trainer.load_checkpoint(args.resume)
+        if lead:
+            print(f"[resume] {args.resume} (global_step={trainer.global_step}, cross-phase)")
+    # Auto-resume: continue from the latest checkpoint under the run's dir
+    # (same-phase continuation: never restart the schedule).
     ckpts_dir = Path(cfg.training.out_dir) / cfg.run_name / "ckpts"
-    if ckpts_dir.exists():
+    if ckpts_dir.exists() and not args.resume:
         candidates = sorted(ckpts_dir.glob("ckpt_*.pt"))
         if candidates:
             latest = candidates[-1]
-            trainer.load_checkpoint(latest)
+            trainer.load_checkpoint(latest, reset_flags=False)
             if lead:
                 print(f"[resume] {latest} (global_step={trainer.global_step})")
 

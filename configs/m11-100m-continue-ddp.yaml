@@ -1,0 +1,63 @@
+# Lyden M11 — CLM memory continue-train from the M10 ckpt (Kaggle T4 x2).
+#
+# Key deltas vs 100m-kaggle-ddp.yaml:
+#   training.reset_scheduler / reset_moe_bias = true (fresh phase from step 7600)
+#   moe.router_znorm + bias_gamma_ramp        = the M11 router fixes
+#   lr                                        = trunk re-warm, cosine over 2,000 steps
+#   total_steps                               = 2,000 additional steps (~65M tokens)
+#   checkpoint_every                          = 200 (ckpt names continue from 7600)
+#   data                                      = pre-mixed 70/30 shards (square/plus session data)
+#   run_name                                  = "100m-m11" (fresh runs/ dir; ckpts still loadable)
+#
+# Launch (2 ranks):
+#   torchrun --standalone --nproc-per-node=2 scripts/train.py --config configs/m11-100m-continue-ddp.yaml \
+#     --resume /kaggle/working/ckpts/ckpt_0007600.pt     (v3 notebook wires this)
+model:
+  vocab_size: 32768
+  dim: 512
+  n_layers: 16
+  layer_pattern: "mmma"
+  mamba: {d_state: 128, d_conv: 4, expand: 2}
+  attention: {n_heads: 8, n_kv_heads: 2, window: 512, n_summary: 64, topk: 256, rope_base: 10000.0}
+  dense_ffn: {hidden: 2048, activation: "swiglu"}
+  moe:
+    n_routed: 8
+    n_shared: 2
+    top_k: 2
+    expert_hidden: 512
+    balance: "loss_free"
+    aux_loss_weight: 0.01
+    bias_gamma: 0.001
+    bias_gamma_ramp: [0.004, 0.001, 400]
+    router_znorm: true
+  dropout: 0.0
+  weight_tying: true
+training:
+  lr: 8.0e-5
+  trunk_lr_mult: 0.1
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  grad_clip: 1.0
+  warmup_steps: 100
+  total_steps: 2000
+  grad_accum: 2
+  amp: "fp16"
+  seq_len: 1024
+  batch_size: 8
+  activation_checkpoint: true
+  checkpoint_every: 200
+  keep_last: 3
+  log_every: 10
+  log_backend: "console"
+  out_dir: "runs"
+  reset_scheduler: true
+  reset_moe_bias: true
+data:
+  dataset: "tinystories"
+  data_dir: "/kaggle/working/lyden-data-m11"
+  tokenizer_dir: "/kaggle/working/lyden-data/tokenizer"
+  val_fraction: 0.01
+clm:
+  buffer_max_chars: 20000
+seed: 1338
+run_name: "100m-m11"

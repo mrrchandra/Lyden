@@ -367,10 +367,16 @@ class Trainer:
         for old in ckpts[:-keep]:
             old.unlink()
 
-    def load_checkpoint(self, path: Path) -> None:
+    def load_checkpoint(self, path: Path, *, reset_flags: bool | None = None) -> None:
+        """Resume from ``path``. ``reset_flags`` overrides the config's
+        reset_scheduler/reset_moe_bias: None = config (explicit cross-phase
+        resume), False = auto-resume of this trainer's own phase (a mid-run
+        crash must NOT restart the schedule it already started)."""
+        reset_sched = self.cfg.training.reset_scheduler if reset_flags is None else reset_flags
+        reset_bias = self.cfg.training.reset_moe_bias if reset_flags is None else reset_flags
         payload = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(payload["model"])
-        if self.cfg.training.reset_moe_bias:
+        if reset_bias:
             # M11: start balancing from a clean slate instead of continuing
             # from biases locked into a collapsed solution.
             from lyden.model.moe import MoE
@@ -379,7 +385,7 @@ class Trainer:
                 if isinstance(module, MoE):
                     module.reset_bias()
         self.opt.load_state_dict(payload["optimizer"])
-        if self.cfg.training.reset_scheduler:
+        if reset_sched:
             # M11: continue-train phase — start the schedule at step 0 so the
             # new warmup/cosine applies over the new total_steps. The lambda
             # reads the scheduler's own epoch, leaving ``global_step`` free
