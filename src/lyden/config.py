@@ -71,6 +71,10 @@ class MoEConfig:
     balance: str = "loss_free"  # "loss_free" (DeepSeek-style bias) or "aux" (Switch-style)
     aux_loss_weight: float = 0.01
     bias_gamma: float = 0.001  # loss-free bias adjustment step size
+    bias_gamma_ramp: tuple[float, float, int] | None = None
+    # (gamma_start, gamma_end, ramp_steps): linear gamma decay over the ramp;
+    # None = constant ``bias_gamma`` (M5..M10 semantics).
+    router_znorm: bool = False  # per-token standardize router scores (M11 fix)
 
     def __post_init__(self) -> None:
         if self.top_k < 1:
@@ -88,6 +92,15 @@ class MoEConfig:
                 f"aux_loss_weight ({self.aux_loss_weight}) must be >= 0 and "
                 f"bias_gamma ({self.bias_gamma}) must be > 0"
             )
+        if self.bias_gamma_ramp is not None:
+            if len(self.bias_gamma_ramp) != 3:
+                raise ValueError("bias_gamma_ramp must be (gamma_start, gamma_end, ramp_steps)")
+            gamma_start, gamma_end, ramp_steps = self.bias_gamma_ramp
+            if gamma_start <= 0 or gamma_end <= 0 or ramp_steps < 1:
+                raise ValueError(
+                    f"bias_gamma_ramp values invalid: {self.bias_gamma_ramp} "
+                    "(gammas must be > 0 and ramp_steps >= 1)"
+                )
 
 
 @dataclass
@@ -157,6 +170,8 @@ class TrainingConfig:
     log_every: int = 10
     log_backend: str = "tensorboard"  # "tensorboard" or "console"
     out_dir: str = "runs"
+    reset_scheduler: bool = False  # on resume: start a fresh lambda phase (M11)
+    reset_moe_bias: bool = False  # on resume: zero the loss-free bias buffers (M11)
 
     def __post_init__(self) -> None:
         if self.trunk_lr_mult <= 0 or self.trunk_lr_mult > 1:
@@ -228,6 +243,24 @@ class LydenConfig:
         return self.model.layer_kinds()
 
 
+def _tuple_hint(hint: Any) -> Any:
+    """Return the tuple subclass of a (possibly Optional) type hint, else None.
+
+    YAML flows are lists, so fields like ``tuple[float, float, int] | None``
+    (M11 ``bias_gamma_ramp``) need the list→tuple conversion too.
+    """
+    if typing.get_origin(hint) is tuple:
+        return hint
+    return next(
+        (
+            arg
+            for arg in typing.get_args(hint)
+            if arg is not type(None) and typing.get_origin(arg) is tuple
+        ),
+        None,
+    )
+
+
 def _build(cls: type, payload: Mapping[str, Any]) -> Any:
     """Build a dataclass instance from a plain mapping, recursing into nested dataclasses.
 
@@ -246,7 +279,7 @@ def _build(cls: type, payload: Mapping[str, Any]) -> Any:
         is_cfg_cls = isinstance(resolved, type) and dataclasses.is_dataclass(resolved)
         if isinstance(value, Mapping) and is_cfg_cls:
             value = _build(resolved, value)
-        elif isinstance(value, list) and typing.get_origin(resolved) is tuple:
+        elif isinstance(value, list) and _tuple_hint(resolved) is not None:
             value = tuple(value)
         kwargs[key] = value
     return cls(**kwargs)

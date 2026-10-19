@@ -267,3 +267,102 @@ def test_moe_routed_output_matches_manual_reference() -> None:
         for mod in moe.shared.values():
             ref = ref + moe._expert_forward(mod, x)
     assert torch.allclose(out, ref, rtol=1e-5, atol=1e-5)
+
+
+# --------------------------------------------------- wave 4: M11 router fixes
+def build_moe_cpu(n_routed: int = 4, **kw):
+    from lyden.model.moe import MoE
+
+    torch.manual_seed(7)
+    cfg = MoEConfig(n_routed=n_routed, **kw)
+    return MoE(cfg, dim=32, dropout=0.0)
+
+
+@requires_gpu
+def test_moe_router_znorm_scores_have_unit_row_std() -> None:
+    """router_znorm=True: per-token scores get standardized before selection
+    and gating, so a scaled router cannot inflate score magnitude."""
+    moe = build_moe_cpu().cuda().eval()
+    with torch.no_grad():
+        moe.router_znorm = True
+        moe.router.weight.mul_(50.0)  # huge score scale
+        x = rand_x(1, 5, dim=32)
+        _, stats = moe(x, collect_stats=True)
+    scores = stats["scores"]  # (B, L, N)
+    std = scores.std(dim=-1, unbiased=False)
+    assert torch.allclose(std, torch.ones_like(std), atol=1e-4)
+    mean = scores.mean(dim=-1)
+    assert mean.abs().max() < 1e-4
+
+
+@requires_gpu
+def test_moe_router_znorm_preserves_selection_and_gate_semantics() -> None:
+    """Affine z-normalization must not change which experts are chosen, and
+    gate values stay positive and sum to k-normalized weights."""
+    moe = build_moe_cpu(n_routed=4).cuda().eval()
+    x = rand_x(1, 5, dim=32)
+    with torch.no_grad():
+        moe.router_znorm = False
+        _, s_raw = moe(x, collect_stats=True)
+        moe.router_znorm = True
+        _, s_z = moe(x, collect_stats=True)
+        assert torch.equal(s_raw["selected"], s_z["selected"]), (
+            "z-norm is affine per token: top-k selection is invariant"
+        )
+        gv = s_z["gate_values"]
+        assert (gv > 0).all()
+        sums = gv.sum(-1)
+        assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
+
+
+@requires_gpu
+def test_moe_reset_bias_zeroes_buffer() -> None:
+    moe = build_moe_cpu().cuda()
+    with torch.no_grad():
+        moe.bias.fill_(3.5)
+        moe.reset_bias()
+    assert torch.equal(moe.bias, torch.zeros_like(moe.bias))
+
+
+def test_effective_bias_gamma_ramp() -> None:
+    from lyden.model.moe import effective_bias_gamma
+
+    ramped = MoEConfig(n_routed=8, bias_gamma=0.001, bias_gamma_ramp=(0.004, 0.001, 400))
+    plain = MoEConfig(n_routed=8, bias_gamma=0.001)
+    assert effective_bias_gamma(ramped, step=0) == 0.004
+    assert effective_bias_gamma(ramped, step=200) == pytest.approx(0.0025)
+    assert effective_bias_gamma(ramped, step=400) == pytest.approx(0.001)
+    assert effective_bias_gamma(ramped, step=99_999) == 0.001
+    assert effective_bias_gamma(plain, step=0) == 0.001
+
+
+@requires_gpu
+def test_moe_ramp_gamma_applies_in_update() -> None:
+    moe = build_moe(n_routed=4, top_k=1, bias_gamma_ramp=(0.004, 0.001, 400))
+    with torch.no_grad():
+        moe.update_bias(load=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda"))
+    assert moe.bias[0].item() == pytest.approx(-0.004)  # ramp gamma applied
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_training_reset_flags(flag) -> None:
+    from lyden.config import TrainingConfig
+
+    cfg = TrainingConfig(reset_scheduler=flag, reset_moe_bias=flag)
+    assert cfg.reset_scheduler == flag
+    assert cfg.reset_moe_bias == flag
+
+
+def test_moe_config_ramp_roundtrip_from_dict() -> None:
+    from lyden.config import from_dict
+
+    cfg = from_dict(
+        MoEConfig,
+        {
+            "n_routed": 8,
+            "router_znorm": True,
+            "bias_gamma_ramp": [0.004, 0.001, 400],
+        },
+    )
+    assert cfg.router_znorm is True
+    assert cfg.bias_gamma_ramp == (0.004, 0.001, 400)

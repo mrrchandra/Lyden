@@ -21,9 +21,7 @@ torch.manual_seed(1337)
 
 requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
-NANO_MOE = MoEConfig(
-    n_routed=8, n_shared=2, top_k=2, expert_hidden=256, balance="loss_free"
-)
+NANO_MOE = MoEConfig(n_routed=8, n_shared=2, top_k=2, expert_hidden=256, balance="loss_free")
 
 
 class CycleBatcher:
@@ -56,16 +54,12 @@ class CycleBatcher:
 
 def trainer_for(**train_kw):
     torch.manual_seed(11)
-    cfg = LydenConfig(
-        model=ModelConfig(vocab_size=8192, dim=256, n_layers=4, moe=NANO_MOE)
-    )
+    cfg = LydenConfig(model=ModelConfig(vocab_size=8192, dim=256, n_layers=4, moe=NANO_MOE))
     for key, value in train_kw.items():
         assert hasattr(cfg.training, key), key
         setattr(cfg.training, key, value)
     model = LydenModel(cfg.model).cuda()
-    trainer = Trainer(
-        cfg, model, CycleBatcher(4, 64), val_batcher=CycleBatcher(2, 64)
-    )
+    trainer = Trainer(cfg, model, CycleBatcher(4, 64), val_batcher=CycleBatcher(2, 64))
     return trainer
 
 
@@ -183,9 +177,7 @@ def test_checkpoint_resume_matches_full_run(tmp_path: Path) -> None:
     for n, p in fresh.model.named_parameters():
         assert torch.equal(p, snapshot_params[n]), n
     assert fresh.global_step == 3
-    for g_new, lr, betas in zip(
-        fresh.opt.param_groups, snapshot_lrs, snapshot_betas, strict=True
-    ):
+    for g_new, lr, betas in zip(fresh.opt.param_groups, snapshot_lrs, snapshot_betas, strict=True):
         assert g_new["lr"] == lr
         assert g_new["betas"] == betas
     for s_new, s_full in zip(fresh.opt.state.values(), snapshot_opt, strict=True):
@@ -257,9 +249,7 @@ def test_stability_monitors() -> None:
 @requires_gpu
 def test_model_collect_stats_contract() -> None:
     torch.manual_seed(5)
-    cfg = LydenConfig(
-        model=ModelConfig(vocab_size=8192, dim=256, n_layers=4, moe=NANO_MOE)
-    )
+    cfg = LydenConfig(model=ModelConfig(vocab_size=8192, dim=256, n_layers=4, moe=NANO_MOE))
     model = LydenModel(cfg.model).cuda().eval()
     tok = torch.randint(0, 8192, (2, 10), device="cuda")
     with torch.no_grad():
@@ -269,3 +259,51 @@ def test_model_collect_stats_contract() -> None:
     assert stats["moe_load@3"].shape == (8,)
     assert torch.allclose(stats["gate@3"].sum(), torch.ones(1, device="cuda"))
     assert torch.allclose(stats["moe_load@3"].sum(), torch.tensor(2.0, device="cuda"))
+
+
+# ---------------------------------------------------- M11: balancer + resume
+def _moe_modules(trainer):
+    from lyden.model.moe import MoE
+
+    return [m for m in trainer.model.modules() if isinstance(m, MoE)]
+
+
+@requires_gpu
+def test_loss_free_bias_updated_every_step() -> None:
+    """M11 fix: the loss-free balancer MUST run per optimizer step (M10 never
+    called update_bias, which is the root cause of the load imbalance)."""
+    tr = trainer_for(amp="fp32", total_steps=100, warmup_steps=10)
+    moes = _moe_modules(tr)
+    assert len(moes) >= 1
+    before = [m.bias.clone() for m in moes]
+    tr.step()
+    for was, m in zip(before, moes, strict=True):
+        assert not torch.equal(was, m.bias), "bias must move after one full step"
+
+
+@requires_gpu
+def test_checkpoint_resume_reset_flags(tmp_path: Path) -> None:
+    tr = trainer_for(amp="fp32", total_steps=100, warmup_steps=10)
+    for _ in range(3):
+        tr.step()
+    ckpt = tr.save_checkpoint()
+    saved_bias = [m.bias.clone() for m in _moe_modules(tr)]
+    assert any(b.abs().sum() > 0 for b in saved_bias), "balancer must have moved bias"
+
+    # Default flags: resume continues scheduler and keeps the balanced bias.
+    fresh = trainer_for(amp="fp32", total_steps=100, warmup_steps=10)
+    fresh.load_checkpoint(ckpt)
+    assert fresh.global_step == 3
+    assert fresh.sched.last_epoch == 3
+    for kept, m in zip(saved_bias, _moe_modules(fresh), strict=True):
+        assert torch.equal(m.bias, kept)
+
+    # M11 reset flags: scheduler restarts its phase; MoE bias starts at zero.
+    reset = trainer_for(
+        amp="fp32", total_steps=100, warmup_steps=10, reset_scheduler=True, reset_moe_bias=True
+    )
+    reset.load_checkpoint(ckpt)
+    assert reset.global_step == 3
+    assert reset.sched.last_epoch == 0
+    for m in _moe_modules(reset):
+        assert torch.equal(m.bias, torch.zeros_like(m.bias))

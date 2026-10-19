@@ -182,6 +182,7 @@ class Trainer:
         grad_norm = self._clip_and_step()
         self.sched.step()
         self.global_step += 1
+        self._update_moe_bias(agg)
         elapsed = time.perf_counter() - t0
         mean_loss = total_loss / accum
         self.recent_losses.append(mean_loss)
@@ -198,6 +199,34 @@ class Trainer:
             "stats": agg,
             "warnings": warnings,
         }
+
+    def _update_moe_bias(self, agg: dict[str, Any]) -> None:
+        """M11: run the loss-free balancer once per optimizer step.
+
+        M10 root cause of the load imbalance: the balancer's call site simply
+        did not exist — stats were collected but ``update_bias`` never ran, so
+        the bias stayed zero for the whole run. Loads are averaged across
+        micro-batches (merge_stats) and, when distributed, across ranks
+        (world-mean) so every rank applies the identical delta.
+        """
+        if self.cfg.model.moe.balance != "loss_free":
+            return
+        from lyden.model.moe import MoE
+
+        for i, blk in enumerate(self.model.blocks):
+            if blk.kind != "a":
+                continue
+            load = agg.get(f"moe_load@{i}")
+            if load is None:
+                continue
+            if self.dist_world > 1 and torch.distributed.is_initialized():
+                load = load.clone()
+                torch.distributed.all_reduce(load, op=torch.distributed.ReduceOp.SUM)
+                load = load / self.dist_world
+            ffn = blk.ffn
+            if not isinstance(ffn, MoE):
+                continue
+            ffn.update_bias(load=load, step=self.global_step)
 
     def _sync_grads(self) -> torch.Tensor:
         """Zero-fill missing grads, flatten, one all-reduce (SUM) — returns the flat buffer.
@@ -341,8 +370,23 @@ class Trainer:
     def load_checkpoint(self, path: Path) -> None:
         payload = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(payload["model"])
+        if self.cfg.training.reset_moe_bias:
+            # M11: start balancing from a clean slate instead of continuing
+            # from biases locked into a collapsed solution.
+            from lyden.model.moe import MoE
+
+            for module in self.model.modules():
+                if isinstance(module, MoE):
+                    module.reset_bias()
         self.opt.load_state_dict(payload["optimizer"])
-        self.sched.load_state_dict(payload["scheduler"])
+        if self.cfg.training.reset_scheduler:
+            # M11: continue-train phase — start the schedule at step 0 so the
+            # new warmup/cosine applies over the new total_steps. The lambda
+            # reads the scheduler's own epoch, leaving ``global_step`` free
+            # to keep its checkpoint value (for naming/logging continuity).
+            self.sched = torch.optim.lr_scheduler.LambdaLR(self.opt, self._lr_lambda)
+        else:
+            self.sched.load_state_dict(payload["scheduler"])
         self.scaler.load_state_dict(payload["scaler"])
         if self.use_dist_scale:
             if "loss_scale" not in payload:

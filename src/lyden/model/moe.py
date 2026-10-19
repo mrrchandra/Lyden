@@ -58,6 +58,8 @@ class MoE(nn.Module):
         self.balance = cfg.balance
         self.aux_weight = cfg.aux_loss_weight
         self.bias_gamma = cfg.bias_gamma
+        self._moe_cfg = cfg
+        self.router_znorm = cfg.router_znorm
 
         # Router + loss-free bias: FAST module named "router" (split LR gr 0).
         self.router = nn.Linear(dim, cfg.n_routed, bias=False)
@@ -79,6 +81,13 @@ class MoE(nn.Module):
     def _route(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Returns (scores (B, L, N), selected (B, L, k), gate_values (B, L, k))."""
         scores = self.router(x)
+        if self.router_znorm:
+            # M11: standardize per token so bias deltas act on a bounded
+            # scale regardless of router weight drift (affine ⇒ top-k
+            # selection is unchanged).
+            scores = (scores - scores.mean(-1, keepdim=True)) / (
+                scores.std(-1, unbiased=False, keepdim=True) + 1e-5
+            )
         selection = scores + self.bias  # bias only perturbs selection
         k = self.top_k
         top = torch.topk(selection, k, dim=-1).indices
@@ -138,17 +147,44 @@ class MoE(nn.Module):
         self._last_load = load.detach()
         return out, stats
 
-    def update_bias(self, load: Tensor | None = None) -> None:
+    def reset_bias(self) -> None:
+        """Zero the loss-free bias (continue-train restart of balancing)."""
+        cast("Tensor", self.bias).zero_()
+
+    def update_bias(
+        self,
+        load: Tensor | None = None,
+        *,
+        gamma: float | None = None,
+        step: int = 0,
+    ) -> None:
         """DeepSeek-V3 loss-free balancing: called once per optimizer step.
 
         ``load`` defaults to the last ``collect_stats=True`` forward. Overloaded
         experts (load > k/N) get their bias decreased; underloaded get it
-        increased by ``bias_gamma`` each.
+        increased. ``gamma`` defaults to the config's ramp at ``step``
+        (plain ``bias_gamma`` without a ramp). The bias is a non-trainable
+        buffer, updated outside the optimizer.
         """
         if load is None:
             load = self._last_load
             if load is None:
                 raise RuntimeError("update_bias() needs load: forward first or pass load")
+        assert load is not None  # narrowed by the branch above
+        if gamma is None:
+            gamma = effective_bias_gamma(self._moe_cfg, step)
         target = self.top_k / self.n_routed
         bias = cast("Tensor", self.bias)
-        bias -= self.bias_gamma * (load - target).sign()
+        bias -= gamma * (load - target).sign()
+
+
+def effective_bias_gamma(cfg: MoEConfig, step: int) -> float:
+    """Per-step loss-free gamma (M11): linear ramp from ``gamma_start`` down
+    to ``bias_gamma`` over ``ramp_steps``; constant without a ramp."""
+    ramp = cfg.bias_gamma_ramp
+    if ramp is None:
+        return cfg.bias_gamma
+    gamma_start, gamma_end, ramp_steps = ramp
+    if step >= ramp_steps:
+        return gamma_end
+    return gamma_start + (gamma_end - gamma_start) * (step / ramp_steps)
