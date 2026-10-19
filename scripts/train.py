@@ -159,21 +159,12 @@ def main() -> None:
         dist_world=world,
         dist_backend=backend,
     )
-    total_steps = cfg.training.total_steps
-    bound = total_steps if args.max_steps is None else min(args.max_steps, total_steps)
-    log_every = cfg.training.log_every
-    ckpt_every = max(1, min(cfg.training.checkpoint_every, total_steps // 10))
-    if lead:
-        print(
-            f"[train] config={args.config} steps={total_steps} warmup={cfg.training.warmup_steps} "
-            f"seq={cfg.training.seq_len} bs={cfg.training.batch_size} "
-            f"accum={cfg.training.grad_accum} amp={cfg.training.amp} world={world}"
-        )
     # Resume precedence: this run's own ckpts (same-phase continuation) first;
     # the explicit --resume path is the M11 cross-phase entry (fresh sessions):
     # config reset flags apply THERE only.
     ckpts_dir = Path(cfg.training.out_dir) / cfg.run_name / "ckpts"
     resumed = False
+    cross_phase = False
     if ckpts_dir.exists():
         candidates = sorted(ckpts_dir.glob("ckpt_*.pt"))
         if candidates:
@@ -184,8 +175,28 @@ def main() -> None:
                 print(f"[resume] {latest} (global_step={trainer.global_step}, own phase)")
     if not resumed and args.resume is not None:
         trainer.load_checkpoint(args.resume)
+        cross_phase = True
         if lead:
             print(f"[resume] {args.resume} (global_step={trainer.global_step}, cross-phase)")
+
+    # Bound semantics: cfg total_steps counts NEW steps this process. Own-phase
+    # auto-resume keeps the absolute view (entry == cfg progress offset);
+    # cross-phase entry counts afresh from the entry checkpoint (M11: 7600 +
+    # 2000 -> 9600). --max-steps caps new steps in this process either way.
+    entry_step = trainer.global_step if cross_phase else 0
+    total_steps = cfg.training.total_steps
+    bound = entry_step + total_steps
+    if args.max_steps is not None:
+        bound = min(bound, entry_step + args.max_steps)
+    ckpt_every = max(1, min(cfg.training.checkpoint_every, total_steps // 10))
+    if lead:
+        print(
+            f"[train] config={args.config} steps={total_steps} warmup={cfg.training.warmup_steps} "
+            f"seq={cfg.training.seq_len} bs={cfg.training.batch_size} "
+            f"accum={cfg.training.grad_accum} amp={cfg.training.amp} world={world} "
+            f"entry={entry_step} target={bound}"
+        )
+    log_every = cfg.training.log_every
 
     t_start = time.perf_counter()
     val_loss = float("nan")

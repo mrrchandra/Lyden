@@ -191,3 +191,68 @@ def test_train_py_two_rank_smoke() -> None:
         assert "batcher_rank0" in payload and "batcher" not in payload
         assert "batcher_rank1" not in payload
         assert payload["config_yaml"].startswith("model:")
+
+
+def test_train_py_cross_phase_continue_runs_new_steps() -> None:
+    """M11 regression: config total_steps counts NEW steps on cross-phase resume.
+
+    scripts/train.py must bound the loop at entry_step + total_steps when
+    continuing from an explicit --resume checkpoint (entry=2, cfg total=6 ->
+    run to step 8), not at the absolute cfg number (which would exit instantly:
+    '7600 < 2000' was the Kaggle casualty of 2026-10-19).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+
+        def make_cfg(outdir: str) -> Path:
+            cfg_path = Path(outdir) / "ddp_smoke.yaml"
+            cfg_path.write_text(_DDP_CFG.format(outdir=outdir.replace("\\", "/")), encoding="utf-8")
+            return cfg_path
+
+        phase1_dir = Path(tmp) / "phase1"
+        phase1_dir.mkdir()
+        cfg_path = make_cfg(str(phase1_dir))
+        env = dict(os.environ)
+        env["LYDEN_DIST_BACKEND"] = "gloo"
+        env.setdefault("OMP_NUM_THREADS", "1")
+
+        def run(cfg_file: Path):
+            return subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "torch.distributed.run",
+                    "--standalone",
+                    "--nproc-per-node=2",
+                    str(ROOT / "scripts" / "train.py"),
+                    "--config",
+                    str(cfg_file),
+                    *extra,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=env,
+                cwd=str(ROOT),
+            )
+
+        # Phase 1: 2 fresh steps (--max-steps = new steps in this process)
+        extra = ["--max-steps", "2"]
+        p1 = run(cfg_path)
+        out1 = p1.stdout + p1.stderr
+        assert p1.returncode == 0, out1
+        ckpt_dir = phase1_dir / "ddp_smoke" / "ckpts"
+        entry_ckpt = ckpt_dir / "ckpt_0000002.pt"
+        assert entry_ckpt.exists(), out1
+
+        # Phase 2: DIFFERENT out_dir (fresh phase) — explicit --resume must be
+        # honored; bound = entry + 6, not 6
+        phase2_dir = Path(tmp) / "phase2"
+        phase2_dir.mkdir()
+        cfg2_path = make_cfg(str(phase2_dir))
+        extra = ["--resume", str(entry_ckpt)]
+        p2 = run(cfg2_path)
+        out2 = p2.stdout + p2.stderr
+        assert p2.returncode == 0, out2
+        assert "cross-phase" in out2, out2
+        assert "[done] reached step 8" in out2, out2
+        assert (phase2_dir / "ddp_smoke" / "ckpts" / "ckpt_0000008.pt").exists(), out2
