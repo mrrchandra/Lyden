@@ -63,10 +63,7 @@ def _tokenizer_compression():
         "Yaar, kal mujhe bahut maza aaya jab humne ghar pe cricket khela. "
         "Fir chai pi ke story sunayi."
     )
-    benglish = (
-        "Bhalobashi bolen toh ami kal bazaar jabo, "
-        "notun boi kinbo ar mishti anbo bari te."
-    )
+    benglish = "Bhalobashi bolen toh ami kal bazaar jabo, notun boi kinbo ar mishti anbo bari te."
     r1 = len(english) / len(tok.encode(english))
     r2 = len(hinglish) / len(tok.encode(hinglish))
     r3 = len(benglish) / len(tok.encode(benglish))

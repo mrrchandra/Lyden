@@ -66,12 +66,10 @@ def test_attn_prefix_length_invariance() -> None:
         full = attn(x, return_branches=True)
         pre = attn(x[:, :p], return_branches=True)
     for branch in ("sliding", "selective"):
-        assert torch.allclose(
-            full[branch][:, :p], pre[branch], rtol=1e-4, atol=1e-4
-        ), branch
-    assert not torch.allclose(
-        full["compressed"][:, :p], pre["compressed"], rtol=1e-3, atol=1e-3
-    ), "anchors changing with L should change compressed prefix outputs"
+        assert torch.allclose(full[branch][:, :p], pre[branch], rtol=1e-4, atol=1e-4), branch
+    assert not torch.allclose(full["compressed"][:, :p], pre["compressed"], rtol=1e-3, atol=1e-3), (
+        "anchors changing with L should change compressed prefix outputs"
+    )
 
 
 @requires_gpu
@@ -203,9 +201,7 @@ def test_selective_support_respects_topk() -> None:
 
     scores = q_se @ k_h.transpose(-1, -2) / (q_se.shape[-1] ** 0.5)
     allow = (selector & causal[None])[:, None]
-    ref = torch.softmax(
-        scores.masked_fill(~allow, float("-inf")), dim=-1
-    ) @ v_h
+    ref = torch.softmax(scores.masked_fill(~allow, float("-inf")), dim=-1) @ v_h
     ref = lib._join_heads(ref)
     assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
 
@@ -230,9 +226,9 @@ def test_gate_uniform_on_zero_input_and_formula_invariant() -> None:
 @requires_gpu
 def test_attn_grads_reach_summary_queries_and_selective_routing() -> None:
     """Gradients reach the summary bank. The indexer is trained via the
-   -effectless selective path (selection is hard top-k) so it tests the aux
-    route: ranking is surrogate — with aux ranking OFF (default), the indexer
-    must NOT receive grads (its selection is non-differentiable by design)."""
+    -effectless selective path (selection is hard top-k) so it tests the aux
+     route: ranking is surrogate — with aux ranking OFF (default), the indexer
+     must NOT receive grads (its selection is non-differentiable by design)."""
     attn = build_attn()
     attn.train()
     x = rand_x(1, 16, requires_grad=True)

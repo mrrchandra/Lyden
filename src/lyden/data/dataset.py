@@ -90,9 +90,7 @@ class ShardIndex:
     def locate(self, global_pos: int) -> tuple[Path, int]:
         """Map a global stream position to ``(shard_path, local_offset)``."""
         if not 0 <= global_pos < self.tokens_total:
-            raise IndexError(
-                f"position {global_pos} outside stream of {self.tokens_total} tokens"
-            )
+            raise IndexError(f"position {global_pos} outside stream of {self.tokens_total} tokens")
         for path, offset, count in zip(
             self.shard_paths, self.shard_offsets, self.tokens_per_shard, strict=False
         ):

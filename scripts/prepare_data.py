@@ -64,9 +64,7 @@ def main() -> int:
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir).expanduser()
-    tokenizer_dir = Path(
-        args.tokenizer_dir if args.tokenizer_dir else data_dir / "tokenizer"
-    )
+    tokenizer_dir = Path(args.tokenizer_dir if args.tokenizer_dir else data_dir / "tokenizer")
 
     # ---------------------------------------------------------------- tokenizer
     if (tokenizer_dir / "tokenizer.json").exists():
@@ -127,9 +125,7 @@ def main() -> int:
         "val_tokens": val_index.tokens_total,
         "shards_dir": str(data_dir / "shards"),
     }
-    (data_dir / "prepare_summary.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8"
-    )
+    (data_dir / "prepare_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
     return 0
 

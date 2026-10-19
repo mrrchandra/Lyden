@@ -25,9 +25,7 @@ requires_gpu = pytest.mark.skipif(
 
 
 def nano_cfg(**kw: Any) -> ModelConfig:
-    utils: dict[str, Any] = dict(
-        vocab_size=8192, dim=256, n_layers=4, layer_pattern="mmma"
-    )
+    utils: dict[str, Any] = dict(vocab_size=8192, dim=256, n_layers=4, layer_pattern="mmma")
     utils.update(kw)
     return ModelConfig(**utils)
 

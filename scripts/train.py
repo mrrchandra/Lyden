@@ -187,7 +187,9 @@ def main() -> None:
     if lead:
         dt = time.perf_counter() - t_start
         tail = f" | loss {info['loss']:.4f} | val {val_loss:.4f}" if info else ""
-        print(f"[done] reached step {trainer.global_step} in {dt/60:.1f} min (this process){tail}")
+        print(
+            f"[done] reached step {trainer.global_step} in {dt / 60:.1f} min (this process){tail}"
+        )
     if world > 1:
         torch.distributed.destroy_process_group()
 

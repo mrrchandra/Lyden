@@ -14,7 +14,7 @@ SAMPLE = [
     "Tim and his mom went to the store to buy apples and bananas for breakfast.",
     "It was a sunny day, so Tom rode his bike all the way to school with his friends.",
     "Lily saw a rainbow after the rain and thought it was the most beautiful thing.",
-    "<|edit|>REPLACE line 3 with \"User likes Python\"<|/edit|>",
+    '<|edit|>REPLACE line 3 with "User likes Python"<|/edit|>',
     "Zażółć gęślą jaźń — naïve café test of unicode.",
 ]
 

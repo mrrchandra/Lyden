@@ -57,9 +57,7 @@ class SyntheticDataset:
         tokens_total: int = 10_000_000,
     ) -> None:
         if vocab_size <= self.N_RESERVED_SPECIALS:
-            raise ValueError(
-                f"vocab_size must exceed {self.N_RESERVED_SPECIALS} reserved specials"
-            )
+            raise ValueError(f"vocab_size must exceed {self.N_RESERVED_SPECIALS} reserved specials")
         rng = np.random.default_rng(seed)
         self._stream = rng.integers(
             self.N_RESERVED_SPECIALS, vocab_size, size=tokens_total, dtype=np.int64

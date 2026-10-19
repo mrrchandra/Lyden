@@ -32,9 +32,7 @@ def list_shard_paths(repo: str, repo_type: str = "dataset") -> dict[str, list[st
 
     api = HfApi()
     names = sorted(
-        f
-        for f in api.list_repo_files(repo, repo_type=repo_type)
-        if f.endswith(".parquet")
+        f for f in api.list_repo_files(repo, repo_type=repo_type) if f.endswith(".parquet")
     )
     shards: dict[str, list[str]] = {}
     for name in names:

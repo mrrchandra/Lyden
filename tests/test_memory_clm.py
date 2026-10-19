@@ -46,11 +46,11 @@ def test_buffer_renders_render_join() -> None:
 
 # ------------------------------------------------------------ parser
 def test_parse_read_variants() -> None:
-    cmd = parse_edit_command('<|edit|>READ line 7<|/edit|>')
+    cmd = parse_edit_command("<|edit|>READ line 7<|/edit|>")
     assert cmd is not None and cmd.verb == "READ" and cmd.lines == (7, 7)
-    cmd = parse_edit_command('<|edit|>READ lines 3 to 9<|/edit|>')
+    cmd = parse_edit_command("<|edit|>READ lines 3 to 9<|/edit|>")
     assert cmd is not None and cmd.verb == "READ" and cmd.lines == (3, 9)
-    cmd = parse_edit_command('<|edit|>READ<|/edit|>')
+    cmd = parse_edit_command("<|edit|>READ<|/edit|>")
     assert cmd is not None and cmd.verb == "READ" and cmd.lines is None
 
 
@@ -62,17 +62,17 @@ def test_parse_write_replace_delete_summarize() -> None:
     cmd = parse_edit_command('<|edit|>REPLACE line 42 with "User prefers Python"<|/edit|>')
     assert cmd is not None and cmd.verb == "REPLACE" and cmd.lines == (42, 42)
     assert cmd.text == "User prefers Python"
-    cmd = parse_edit_command('<|edit|>DELETE line 3<|/edit|>')
+    cmd = parse_edit_command("<|edit|>DELETE line 3<|/edit|>")
     assert cmd is not None and cmd.verb == "DELETE" and cmd.lines == (3, 3)
-    cmd = parse_edit_command('<|edit|>SUMMARIZE line 12<|/edit|>')
+    cmd = parse_edit_command("<|edit|>SUMMARIZE line 12<|/edit|>")
     assert cmd is not None and cmd.verb == "SUMMARIZE" and cmd.lines == (12, 12)
 
 
 def test_parse_ignores_incomplete_and_unknown() -> None:
-    assert parse_edit_command('no commands here') is None
+    assert parse_edit_command("no commands here") is None
     assert parse_edit_command('<|edit|>REPLACE line 1 with "unclosed') is None
     with pytest.raises(ValueError):
-        cmd = parse_edit_command('<|edit|>TELEPORT line 1<|/edit|>')
+        cmd = parse_edit_command("<|edit|>TELEPORT line 1<|/edit|>")
         assert cmd is not None
         apply_edit(ContextBuffer(), cmd)
 
@@ -80,9 +80,9 @@ def test_parse_ignores_incomplete_and_unknown() -> None:
 # ------------------------------------------------------------ executor
 def test_apply_edit_operations() -> None:
     b = ContextBuffer(["a", "b", "c"])
-    out = apply_edit(b, parse_edit_command('<|edit|>READ line 2<|/edit|>'))  # type: ignore[arg-type]
+    out = apply_edit(b, parse_edit_command("<|edit|>READ line 2<|/edit|>"))  # type: ignore[arg-type]
     assert out == "b"
-    out = apply_edit(b, parse_edit_command('<|edit|>READ lines 1 to 3<|/edit|>'))  # type: ignore[arg-type]
+    out = apply_edit(b, parse_edit_command("<|edit|>READ lines 1 to 3<|/edit|>"))  # type: ignore[arg-type]
     assert out == "a\nb\nc"
     out = apply_edit(b, parse_edit_command('<|edit|>WRITE with "hi mom"<|/edit|>'))  # type: ignore[arg-type]
     assert b.read(4) == "hi mom"
@@ -90,16 +90,16 @@ def test_apply_edit_operations() -> None:
     assert b.read(2) == "x" and b.n_lines == 5
     apply_edit(b, parse_edit_command('<|edit|>REPLACE line 2 with "y"<|/edit|>'))  # type: ignore[arg-type]
     assert b.read(2) == "y"
-    apply_edit(b, parse_edit_command('<|edit|>DELETE line 1<|/edit|>'))  # type: ignore[arg-type]
+    apply_edit(b, parse_edit_command("<|edit|>DELETE line 1<|/edit|>"))  # type: ignore[arg-type]
     assert b.read(1) == "y"
     out = apply_edit(
         b,
-        parse_edit_command('<|edit|>SUMMARIZE line 1<|/edit|>'),  # type: ignore[arg-type]
+        parse_edit_command("<|edit|>SUMMARIZE line 1<|/edit|>"),  # type: ignore[arg-type]
         summarizer=lambda s: s.upper(),
     )
     assert out == "Y" and b.read(1) == "Y"
     with pytest.raises(ValueError):
-        apply_edit(b, parse_edit_command('<|edit|>SUMMARIZE line 1<|/edit|>'))  # type: ignore[arg-type]
+        apply_edit(b, parse_edit_command("<|edit|>SUMMARIZE line 1<|/edit|>"))  # type: ignore[arg-type]
 
 
 def test_prompt_edits_consumed() -> None:
@@ -158,9 +158,7 @@ def test_generate_with_clm_injected_edit() -> None:
             self.step = 0
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            logits = torch.full(
-                (x.shape[0], x.shape[1], self.vocab), -1e9, device=x.device
-            )
+            logits = torch.full((x.shape[0], x.shape[1], self.vocab), -1e9, device=x.device)
             if len(self.ids) > 0 and self.step < len(self.ids):
                 logits[:, -1, self.ids[self.step]] = 1e9
             self.step += 1

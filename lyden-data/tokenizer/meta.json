@@ -1,0 +1,12 @@
+{
+  "vocab_size": 22781,
+  "special_tokens": [
+    "<|pad|>",
+    "<|bos|>",
+    "<|eos|>",
+    "<|edit|>",
+    "<|/edit|>",
+    "<|context|>",
+    "<|/context|>"
+  ]
+}

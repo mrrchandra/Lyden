@@ -81,7 +81,4 @@ class MambaBlock(nn.Module):
         training's parallel scan. seq_idx: optional (B, L) int segment ids
         that isolate packed documents (var-length training).
         """
-        return x + self.dropout(
-            self.mixer(self.norm(x), inference_params=cache, seq_idx=seq_idx)
-        )
-
+        return x + self.dropout(self.mixer(self.norm(x), inference_params=cache, seq_idx=seq_idx))

@@ -34,9 +34,7 @@ def _val_batcher(cfg: LydenConfig, seq_len: int, batch_size: int, seed: int) -> 
     else:
         shards = Path(cfg.data.data_dir).expanduser() / "shards"
         val_ds = ShardDataset(shards, "val")
-    return PackedBatcher(
-        val_ds, seq_len=seq_len, batch_size=batch_size, seed=seed, shuffle=False
-    )
+    return PackedBatcher(val_ds, seq_len=seq_len, batch_size=batch_size, seed=seed, shuffle=False)
 
 
 @torch.no_grad()

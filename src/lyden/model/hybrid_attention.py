@@ -256,9 +256,7 @@ class HybridAttention(nn.Module):
         rank_mat = torch.where(causal[None], ranks_q[:, :, None], neg_inf_fill[:, :, None])
         k_sel = min(self.topk, lk)
         top = torch.topk(rank_mat, k_sel, dim=-1).indices  # (B, lq, k)
-        selector = torch.zeros(b, lq, lk, dtype=torch.bool, device=q.device).scatter_(
-            2, top, True
-        )
+        selector = torch.zeros(b, lq, lk, dtype=torch.bool, device=q.device).scatter_(2, top, True)
 
         scores = q @ k.transpose(-1, -2) / math.sqrt(dh)  # (B, H, lq, lk)
         allow = (selector & causal)[:, None]  # (B, 1, lq, lk) broadcast over heads
@@ -301,11 +299,7 @@ class HybridAttention(nn.Module):
         b_se = self._selective(q_se, k_h, v_h, x)
 
         weights = self.gate(x).softmax(dim=-1)  # (B, L, 3)
-        mixed = (
-            weights[..., 0:1] * b_sl
-            + weights[..., 1:2] * b_co
-            + weights[..., 2:3] * b_se
-        )
+        mixed = weights[..., 0:1] * b_sl + weights[..., 1:2] * b_co + weights[..., 2:3] * b_se
         out = x + self.dropout(self.out_proj(mixed))
         if decode_caches is not None:
             decode_caches["k_c"] = k.detach()
@@ -321,9 +315,7 @@ class HybridAttention(nn.Module):
             }
         return out
 
-    def step_branches(
-        self, x_one: Tensor, caches: dict[str, Tensor], position: int
-    ) -> Tensor:
+    def step_branches(self, x_one: Tensor, caches: dict[str, Tensor], position: int) -> Tensor:
         """One-token decode step; training-math equivalent.
 
         x_one: (B, 1, D) pre-norm input; ``caches`` holds rope'd keys
@@ -365,11 +357,7 @@ class HybridAttention(nn.Module):
         b_se = self._selective(q_se, k_h, v_h, x_one, q_pos=q_positions)
 
         weights = self.gate(x_one).softmax(dim=-1)  # (B, 1, 3)
-        mixed = (
-            weights[..., 0:1] * b_sl
-            + weights[..., 1:2] * b_co
-            + weights[..., 2:3] * b_se
-        )
+        mixed = weights[..., 0:1] * b_sl + weights[..., 1:2] * b_co + weights[..., 2:3] * b_se
         out = x_one + self.dropout(self.out_proj(mixed))
         caches["k_c"], caches["v_c"], caches["ranks"] = k_c, v_c, ranks_c
         return out

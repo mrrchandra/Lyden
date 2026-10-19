@@ -66,8 +66,10 @@ def main() -> None:
             fast[g] += p.numel()
     total = sum(counts.values())
     width = max((len(k) for k in counts), default=8)
-    print(f"config: {path.stem}  (dim={cfg.model.dim}, layers={cfg.model.n_layers}, "
-          f"pattern={cfg.model.layer_pattern!r}, vocab={cfg.model.vocab_size})")
+    print(
+        f"config: {path.stem}  (dim={cfg.model.dim}, layers={cfg.model.n_layers}, "
+        f"pattern={cfg.model.layer_pattern!r}, vocab={cfg.model.vocab_size})"
+    )
     for g, n in counts.most_common():
         print(f"  {g:{width}s} {n:>11,d}")
     print(f"  {'TOTAL':{width}s} {total:>11,d}")

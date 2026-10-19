@@ -53,8 +53,7 @@ def main() -> None:
         res = perplexity(model, cfg, n_batches=args.val_batches, device=device)
         report["ppl"] = res
         print(
-            f"[ppl] loss {res['loss']:.4f} | ppl {res['ppl']:.2f}"
-            f" | tokens {res['loss_tokens']:.0f}"
+            f"[ppl] loss {res['loss']:.4f} | ppl {res['ppl']:.2f} | tokens {res['loss_tokens']:.0f}"
         )
     if "longctx" in tasks:
         lengths = tuple(int(v) for v in args.lengths.split(",") if v)
@@ -82,9 +81,7 @@ def main() -> None:
 
     out_dir = Path(cfg.training.out_dir) / cfg.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "eval_report.json").write_text(
-        json.dumps(report, indent=2), encoding="utf-8"
-    )
+    (out_dir / "eval_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[saved] {out_dir / 'eval_report.json'}")
 
 

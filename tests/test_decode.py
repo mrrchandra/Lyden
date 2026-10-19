@@ -28,9 +28,7 @@ def _model(seed: int = 5) -> LydenModel:
         n_layers=4,
         layer_pattern="mmam",
         mamba=MambaConfig(d_state=32, d_conv=4, expand=2),
-        attention=AttentionConfig(
-            n_heads=8, n_kv_heads=2, window=64, n_summary=16, topk=32
-        ),
+        attention=AttentionConfig(n_heads=8, n_kv_heads=2, window=64, n_summary=16, topk=32),
         moe=MoEConfig(n_routed=4, n_shared=1, expert_hidden=96),
     )
     return LydenModel(cfg).cuda().eval()
@@ -103,9 +101,12 @@ def test_decode_state_structure_and_positions() -> None:
     assert set(state.kv_caches) >= {2}  # layer 2 is the attention block
     step(model, state, 88)
     assert state.query_pos == 7
-    assert state.kv_caches[2][  # type: ignore[index]
-        "k_c"
-    ].shape[-3] == 7  # cache extended
+    assert (
+        state.kv_caches[2][  # type: ignore[index]
+            "k_c"
+        ].shape[-3]
+        == 7
+    )  # cache extended
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")

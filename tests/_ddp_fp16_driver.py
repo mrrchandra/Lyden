@@ -102,9 +102,9 @@ def main() -> None:
     assert np.isfinite(grad_norm) and grad_norm >= 0.0
     assert trainer.dist_scale == 32768.0
     assert trainer._scale_growth_tracker == 1
-    assert cross_rank_equal(
-        param_checksum(params)
-    ), f"rank{rank}: weights diverged from the other rank after the joint step"
+    assert cross_rank_equal(param_checksum(params)), (
+        f"rank{rank}: weights diverged from the other rank after the joint step"
+    )
 
     # ---- C: full step() on the dist path (MoE experts may leave grad=None;
     # the flat zero-filled sync must keep the collectives aligned)
@@ -112,9 +112,9 @@ def main() -> None:
     assert np.isfinite(info["loss"]), f"rank{rank}: loss {info['loss']}"
     info = trainer.step()
     assert np.isfinite(info["loss"])
-    assert cross_rank_equal(
-        param_checksum(params)
-    ), f"rank{rank}: weights diverged after full steps"
+    assert cross_rank_equal(param_checksum(params)), (
+        f"rank{rank}: weights diverged after full steps"
+    )
 
     if rank == 0:
         print("[fp16-scale-lockstep] ok", flush=True)

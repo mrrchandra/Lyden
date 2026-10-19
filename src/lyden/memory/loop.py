@@ -70,9 +70,7 @@ class _RecomputeCtx:
 
     def advance(self, nxt: int) -> None:
         assert self.cur_ids is not None
-        self.cur_ids = torch.cat(
-            [self.cur_ids, torch.tensor([[nxt]], device=self._device)], dim=1
-        )
+        self.cur_ids = torch.cat([self.cur_ids, torch.tensor([[nxt]], device=self._device)], dim=1)
         self.logits = self._model(self.cur_ids)  # type: ignore[operator]
 
     def restart(self, buffer: ContextBuffer) -> None:
