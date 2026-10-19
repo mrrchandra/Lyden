@@ -157,21 +157,23 @@ def main() -> None:
             f"seq={cfg.training.seq_len} bs={cfg.training.batch_size} "
             f"accum={cfg.training.grad_accum} amp={cfg.training.amp} world={world}"
         )
-    # Explicit cross-phase resume (M11): config reset flags apply.
-    if args.resume is not None:
-        trainer.load_checkpoint(args.resume)
-        if lead:
-            print(f"[resume] {args.resume} (global_step={trainer.global_step}, cross-phase)")
-    # Auto-resume: continue from the latest checkpoint under the run's dir
-    # (same-phase continuation: never restart the schedule).
+    # Resume precedence: this run's own ckpts (same-phase continuation) first;
+    # the explicit --resume path is the M11 cross-phase entry (fresh sessions):
+    # config reset flags apply THERE only.
     ckpts_dir = Path(cfg.training.out_dir) / cfg.run_name / "ckpts"
-    if ckpts_dir.exists() and not args.resume:
+    resumed = False
+    if ckpts_dir.exists():
         candidates = sorted(ckpts_dir.glob("ckpt_*.pt"))
         if candidates:
             latest = candidates[-1]
             trainer.load_checkpoint(latest, reset_flags=False)
+            resumed = True
             if lead:
-                print(f"[resume] {latest} (global_step={trainer.global_step})")
+                print(f"[resume] {latest} (global_step={trainer.global_step}, own phase)")
+    if not resumed and args.resume is not None:
+        trainer.load_checkpoint(args.resume)
+        if lead:
+            print(f"[resume] {args.resume} (global_step={trainer.global_step}, cross-phase)")
 
     t_start = time.perf_counter()
     val_loss = float("nan")
