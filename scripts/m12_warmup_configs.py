@@ -71,7 +71,7 @@ def _phase_cfg(raw: dict, name: str, window: int, total_steps: int) -> dict:
     batch, accum = _data_geometry(window)
     cfg["training"]["batch_size"] = batch
     cfg["training"]["grad_accum"] = accum
-    cfg["data"]["data_dir"] = f"/kaggle/working/lyden-data-m12-{name}"
+    cfg["data"]["data_dir"] = "/kaggle/working/lyden-data-m12"
     cfg["data"]["tokenizer_dir"] = "/kaggle/working/lyden-data/tokenizer"
     return cfg
 

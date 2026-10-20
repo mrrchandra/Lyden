@@ -56,7 +56,7 @@ training:
   reset_moe_bias: true
 data:
   dataset: tinystories
-  data_dir: /kaggle/working/lyden-data-m12-d
+  data_dir: /kaggle/working/lyden-data-m12
   tokenizer_dir: /kaggle/working/lyden-data/tokenizer
   val_fraction: 0.01
 clm:
