@@ -256,3 +256,66 @@ def test_train_py_cross_phase_continue_runs_new_steps() -> None:
         assert "cross-phase" in out2, out2
         assert "[done] reached step 8" in out2, out2
         assert (phase2_dir / "ddp_smoke" / "ckpts" / "ckpt_0000008.pt").exists(), out2
+
+
+def test_train_py_absolute_bound_survives_own_phase_resume() -> None:
+    """M12 regression (2026-10-21 casualty): own-phase auto-resume cannot
+    recompute the relative entry, so with only cfg total_steps it exited
+    instantly ([done] at the resumed step) and never saved the edge ckpt,
+    which starved the phase chain. With training.bound_step the edge is
+    pinned absolutely and the mid-phase crash resume continues training."""
+    bound_cfg_text = _DDP_CFG.replace(
+        'out_dir: "{outdir}"', 'out_dir: "{outdir}"\n  bound_step: 8'
+    )
+    assert "bound_step: 8" in bound_cfg_text
+    with tempfile.TemporaryDirectory() as tmp:
+
+        def make_cfg(outdir: str) -> Path:
+            cfg_path = Path(outdir) / "ddp_smoke.yaml"
+            cfg_path.write_text(
+                bound_cfg_text.format(outdir=outdir.replace("\\", "/")), encoding="utf-8"
+            )
+            return cfg_path
+
+        phase_dir = Path(tmp) / "phase"
+        phase_dir.mkdir()
+        env = dict(os.environ)
+        env["LYDEN_DIST_BACKEND"] = "gloo"
+        env.setdefault("OMP_NUM_THREADS", "1")
+
+        def run(cfg_file: Path, *extra: str):
+            return subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "torch.distributed.run",
+                    "--standalone",
+                    "--nproc-per-node=2",
+                    str(ROOT / "scripts" / "train.py"),
+                    "--config",
+                    str(cfg_file),
+                    *extra,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=env,
+                cwd=str(ROOT),
+            )
+
+        # Attempt 1: stop early (as if the worker died at step 2)
+        cfg_path = make_cfg(str(phase_dir))
+        p1 = run(cfg_path, "--max-steps", "2")
+        out1 = p1.stdout + p1.stderr
+        assert p1.returncode == 0, out1
+        ckpt2 = phase_dir / "ddp_smoke" / "ckpts" / "ckpt_0000002.pt"
+        assert ckpt2.exists(), out1
+
+        # Attempt 2 (new process, same dir): own-phase auto-resume must train
+        # to the ABSOLUTE edge 8, not exit instantly at step 2 < cfg 6.
+        p2 = run(cfg_path)
+        out2 = p2.stdout + p2.stderr
+        assert p2.returncode == 0, out2
+        assert "own phase" in out2, out2
+        assert "[done] reached step 8" in out2, out2
+        assert (phase_dir / "ddp_smoke" / "ckpts" / "ckpt_0000008.pt").exists(), out2

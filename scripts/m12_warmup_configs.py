@@ -43,28 +43,35 @@ def build_phase_configs(entry_step: int = 9600) -> list[dict]:
     base = load_config(BASE_CONFIG)
     raw = dataclasses.asdict(base)
     configs: list[dict] = []
+    step = entry_step
     for name, (window, total_steps) in zip(PHASE_NAMES, WINDOWS_AND_STEPS, strict=False):
-        cfg = _phase_cfg(raw, name, window, total_steps)
+        step += total_steps
+        cfg = _phase_cfg(raw, name, window, total_steps, bound_step=step)
         configs.append(cfg)
     return configs
 
 
-def write_phase_configs(out_dir: Path = Path("configs")) -> list[Path]:
+def write_phase_configs(
+    out_dir: Path = Path("configs"), entry_step: int = 9600
+) -> list[Path]:
     paths: list[Path] = []
-    for name, cfg in zip(PHASE_NAMES, build_phase_configs(), strict=False):
+    for name, cfg in zip(PHASE_NAMES, build_phase_configs(entry_step), strict=False):
         path = out_dir / f"m12-phase-{name}.yaml"
         path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         paths.append(path)
     return paths
 
 
-def _phase_cfg(raw: dict, name: str, window: int, total_steps: int) -> dict:
+def _phase_cfg(
+    raw: dict, name: str, window: int, total_steps: int, bound_step: int
+) -> dict:
     import copy
 
     cfg = copy.deepcopy(raw)
     cfg["run_name"] = f"100m-m12-{name}"
     cfg["training"]["seq_len"] = window
     cfg["training"]["total_steps"] = total_steps
+    cfg["training"]["bound_step"] = bound_step
     cfg["training"]["checkpoint_every"] = CKPT_EVERY
     cfg["training"]["reset_scheduler"] = True
     cfg["training"]["reset_moe_bias"] = True
@@ -88,7 +95,7 @@ def main() -> int:
     parser.add_argument("--entry-step", type=int, default=9600)
     parser.add_argument("--out-dir", default="configs")
     args = parser.parse_args()
-    for path in write_phase_configs(Path(args.out_dir)):
+    for path in write_phase_configs(Path(args.out_dir), args.entry_step):
         print(f"wrote {path}")
     print("edges:", phase_edges(args.entry_step))
     return 0

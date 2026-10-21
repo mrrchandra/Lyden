@@ -30,6 +30,14 @@ def test_five_phases_with_planned_windows_and_steps() -> None:
     assert [c["training"]["total_steps"] for c in configs] == [s for _, s in WINDOWS_AND_STEPS]
 
 
+def test_absolute_bound_steps_survive_any_resume() -> None:
+    """Crash-resume regression: own-phase resume can't recompute the relative
+    entry, so each phase config pins its ABSOLUTE edge (training.bound_step)."""
+    edges = phase_edges(entry_step=ENTRY_STEP)
+    for cfg, edge in zip(build_phase_configs(ENTRY_STEP), edges, strict=False):
+        assert cfg["training"]["bound_step"] == edge
+
+
 def test_effective_batch_tokens_within_budget() -> None:
     """Per-rank optimizer tokens (batch * seq * accum) must stay in 16K..524K."""
     for cfg in build_phase_configs():
@@ -69,6 +77,7 @@ def test_written_yaml_round_trips_through_load_config(tmp_path: Path) -> None:
     cfg = load_config(path)
     assert cfg.training.seq_len == 2048
     assert cfg.training.total_steps == 750
+    assert cfg.training.bound_step == 10350
     assert cfg.run_name == "100m-m12-a"
 
 

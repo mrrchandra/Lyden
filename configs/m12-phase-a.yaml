@@ -42,6 +42,7 @@ training:
   grad_clip: 1.0
   warmup_steps: 100
   total_steps: 750
+  bound_step: 10350
   grad_accum: 8
   amp: fp16
   seq_len: 2048

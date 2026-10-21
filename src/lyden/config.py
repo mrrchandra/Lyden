@@ -160,6 +160,7 @@ class TrainingConfig:
     grad_clip: float = 1.0
     warmup_steps: int = 2000
     total_steps: int = 100_000
+    bound_step: int | None = None  # absolute global step to stop at (M12 phase edges)
     grad_accum: int = 4
     amp: str = "bf16"  # "bf16", "fp16", or "fp32"
     seq_len: int = 2048

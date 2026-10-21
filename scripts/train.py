@@ -125,6 +125,8 @@ def main() -> None:
         # keeps tokens/step and the scheduler when world size differs from the
         # config's assumed 2 ranks (e.g. single-GPU P100: mult=2 in-cell)
         cfg.training.grad_accum *= args.accum_mult
+    total_steps = cfg.training.total_steps
+    bound_step = cfg.training.bound_step
     rank = int(os.environ.get("RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -183,18 +185,30 @@ def main() -> None:
     # auto-resume keeps the absolute view (entry == cfg progress offset);
     # cross-phase entry counts afresh from the entry checkpoint (M11: 7600 +
     # 2000 -> 9600). --max-steps caps new steps in this process either way.
-    entry_step = trainer.global_step if cross_phase else 0
-    total_steps = cfg.training.total_steps
-    bound = entry_step + total_steps
+    # M12 phase configs instead set an ABSOLUTE target (training.bound_step):
+    # that edge survives both cross-phase entry and mid-phase crash resume,
+    # where the relative entry would otherwise be unrecoverable (the own ckpt
+    # records only the absolute step, so entry_steps-done is unknowable).
+    if bound_step is not None:
+        bound = bound_step
+        target_kind = "absolute"
+    else:
+        entry_step = trainer.global_step if cross_phase else 0
+        bound = entry_step + total_steps
+        target_kind = "relative"
     if args.max_steps is not None:
-        bound = min(bound, entry_step + args.max_steps)
+        if bound_step is not None:
+            # cap must also be absolute: clamp against the resumed step
+            bound = min(bound, trainer.global_step + args.max_steps)
+        else:
+            bound = min(bound, entry_step + args.max_steps)
     ckpt_every = max(1, min(cfg.training.checkpoint_every, total_steps // 10))
     if lead:
         print(
             f"[train] config={args.config} steps={total_steps} warmup={cfg.training.warmup_steps} "
             f"seq={cfg.training.seq_len} bs={cfg.training.batch_size} "
             f"accum={cfg.training.grad_accum} amp={cfg.training.amp} world={world} "
-            f"entry={entry_step} target={bound}"
+            f"target={bound} ({target_kind})"
         )
     log_every = cfg.training.log_every
 
